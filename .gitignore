@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# yread output (generated wiki — not version-controlled)
+.yread/
+
+# Local comparison runs and generated fixtures
+experiments/
+
+# Environment
+.venv/
+venv/
+.env
+.env.*
+!.env.yread.example
+.env.yread
+.env.yread.local
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

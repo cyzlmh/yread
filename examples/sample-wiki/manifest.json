@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-29T00:00:00.000000Z",
+  "files": [
+    {
+      "path": "README.md",
+      "hash": "sample-readme",
+      "size": 6426
+    },
+    {
+      "path": "pyproject.toml",
+      "hash": "sample-project",
+      "size": 330
+    },
+    {
+      "path": "src/yread/core.py",
+      "hash": "sample-yread",
+      "size": 44210
+    }
+  ]
+}

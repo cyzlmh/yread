@@ -1,0 +1,29 @@
+{
+  "id": "sample",
+  "generated_at": "2026-06-29T00:00:00.000000Z",
+  "language": "en",
+  "pages": [
+    {
+      "slug": "1-overview",
+      "title": "Overview",
+      "file": "1-overview.md",
+      "section": "Get Started",
+      "level": "Beginner",
+      "associatedFiles": [
+        "README.md",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "slug": "2-agent-pipeline",
+      "title": "Agent Pipeline",
+      "file": "2-agent-pipeline.md",
+      "section": "Deep Dive",
+      "group": "Core Mechanics",
+      "level": "Intermediate",
+      "associatedFiles": [
+        "src/yread/core.py"
+      ]
+    }
+  ]
+}

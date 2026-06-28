@@ -1,0 +1,44 @@
+[project]
+name = "yread"
+version = "0.1.0"
+description = "Local lightweight repo-to-wiki generator inspired by zread."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "markdown>=3.6",
+    "openai>=1.30",
+    "pypinyin>=0.51",
+]
+
+[project.scripts]
+yread = "yread.cli:main"
+yread-view = "yread.viewer:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.env.yread.example",
+    "/examples",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/skills",
+    "/src",
+    "/tests",
+    "/uv.lock",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yread"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
