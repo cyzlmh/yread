@@ -1,13 +1,14 @@
 """view — browse a yread wiki in the browser, the way zread's server does.
 
-    yread view [wiki_dir] [--port 8000] [--repo <repo_path>]
+    yread browse [wiki_dir] [--host localhost] [--port 8000] [--repo <repo_path>]
 
 wiki_dir defaults to ./.yread/wiki. If it holds a `current` pointer the latest
 version is served; a version dir (with wiki.json) also works directly.
 
 Renders each page's markdown with mermaid diagrams, a section/level sidebar from
-wiki.json, and resolves the inter-page `[title](slug)` cross-links. With --repo,
-the `Sources: [file](path#Lx-Ly)` citations link to the real source files.
+wiki.json, and resolves the inter-page `[title](slug)` cross-links. The source
+repo recorded in wiki.json (`source_root`) makes `Sources: [file](path#Lx-Ly)`
+citations link to the real files; pass --repo to override it.
 """
 import re
 import sys
@@ -150,23 +151,28 @@ class Handler(BaseHTTPRequestHandler):
 def main(argv: list[str] | None = None):
     import json
     args = [a for a in (sys.argv[1:] if argv is None else argv)]
-    port = 8000; repo = None; wiki_arg = None
+    host = "localhost"; port = 8000; repo = None; wiki_arg = None
     i = 0
     while i < len(args):
         if args[i] == "--port": port = int(args[i + 1]); i += 2
+        elif args[i] == "--host": host = args[i + 1]; i += 2
         elif args[i] == "--repo": repo = Path(args[i + 1]).resolve(); i += 2
         else: wiki_arg = args[i]; i += 1
     wiki = resolve_wiki(wiki_arg)
     meta = json.loads((wiki / "wiki.json").read_text())
+    if repo is None and meta.get("source_root"):
+        recorded = Path(meta["source_root"])
+        if recorded.is_dir():
+            repo = recorded.resolve()
     pages = meta["pages"]
     Handler.wiki, Handler.pages = wiki, pages
     Handler.byslug = {p["slug"]: p for p in pages}
     Handler.repo = repo
-    url = f"http://127.0.0.1:{port}/"
-    print(f"yread viewer: {wiki}\n  {len(pages)} pages -> {url}  (Ctrl-C to stop)", flush=True)
+    url = f"http://{host}:{port}/"
+    print(f"yread browser: {wiki}\n  {len(pages)} pages -> {url}  (Ctrl-C to stop)", flush=True)
     try: webbrowser.open(url)
     except Exception: pass
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

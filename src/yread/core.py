@@ -9,14 +9,14 @@ Both agents see only three read-only tools (dir tree / read file / read-only
 bash) and explore the repo themselves before writing.
 
 Usage:
-    yread generate <repo_path> [--output-dir <wiki_dir>] [--env-file .env.yread]
+    yread generate [repo_path] [--env-file .env.yread]   (repo_path defaults to .)
 
 Config via env:
     PROVIDER    which LLM provider to use     (minimax-cn | deepseek | openai-compatible)
     BASE_URL    override the provider endpoint (else resolved per provider)
     API_KEY     override the key              (else resolved per provider)
     MODEL       override the model name       (else the provider's default)
-    DOC_LANG    documentation language       (default English; NOT $LANG)
+    DOC_LANG    documentation language code  (default en; e.g. zh | en; NOT $LANG)
     MAX_STEPS   tool-call rounds per agent   (default 24)
     MAX_TOPICS  catalog topic cap            (default 30)
     CONCURRENCY parallel page agents          (default 1)
@@ -162,19 +162,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Turn a local repository into a lightweight structured wiki.",
     )
-    p.add_argument("repo_path", help="Repository to analyze")
-    p.add_argument("--output-dir", default=None, help="Wiki output directory; default: OUTPUT_DIR or <repo>/.yread/wiki")
+    p.add_argument("repo_path", nargs="?", default=".",
+                   help="Repository to analyze (default: current directory)")
     p.add_argument("--env-file", type=Path, default=None,
                    help="Optional dotenv-style config file, e.g. .env.yread")
-    p.add_argument("--provider", choices=sorted(PROVIDERS), default=None)
-    p.add_argument("--base-url", default=None, help="OpenAI-compatible /v1 endpoint")
-    p.add_argument("--api-key", default=None, help="LLM API key")
-    p.add_argument("--model", default=None, help="Model name")
-    p.add_argument("--doc-lang", default=None, help="Documentation language, e.g. Chinese or English")
-    p.add_argument("--max-steps", type=int, default=None, help="Max tool rounds per agent")
-    p.add_argument("--max-topics", type=int, default=None, help="Catalog topic cap")
-    p.add_argument("--concurrency", type=int, default=None, help="Parallel page agents")
-    p.add_argument("--no-shell", action="store_true", help="Disable the run_bash tool")
     p.add_argument("--resume", action="store_true", help="Resume latest incomplete wiki version")
     p.add_argument("--page", default=None,
                    help="Generate one page by slug, title, or markdown filename")
@@ -188,25 +179,27 @@ def config_from_args(args: argparse.Namespace, config_files: list[Path] | None =
     file_env = _parse_env_files(config_files)
     if args.env_file:
         file_env.update(_parse_env_file(args.env_file))
+    # All tunables now live in config (~/.yread/config.env, --env-file, or env vars),
+    # mirroring zread: the generate command stays lean and config holds the knobs.
     # NB: do NOT read os.environ["LANG"] — that's the POSIX locale (e.g. en_US.UTF-8)
-    # and would silently force English output. Use a dedicated, non-colliding name.
-    provider = args.provider or _env_get(file_env, "PROVIDER", "minimax-cn") or "minimax-cn"
+    # and would silently force English output. Use the dedicated DOC_LANG name.
+    provider = _env_get(file_env, "PROVIDER", "minimax-cn") or "minimax-cn"
     if provider not in PROVIDERS:
         raise SystemExit(f"unknown PROVIDER {provider!r}; choose one of: {', '.join(PROVIDERS)}")
-    concurrency = args.concurrency if args.concurrency is not None else _env_int(file_env, "CONCURRENCY", 1)
+    concurrency = _env_int(file_env, "CONCURRENCY", 1)
     if concurrency < 1:
-        raise SystemExit("CONCURRENCY / --concurrency must be >= 1")
+        raise SystemExit("CONCURRENCY must be >= 1")
     return RuntimeConfig(
         provider=provider,
-        base_url=args.base_url or _env_get(file_env, "BASE_URL"),
-        api_key=args.api_key or _env_get(file_env, "API_KEY"),
-        model=args.model or _env_get(file_env, "MODEL"),
-        doc_lang=args.doc_lang or _env_get(file_env, "DOC_LANG", "English") or "English",
-        max_steps=args.max_steps if args.max_steps is not None else _env_int(file_env, "MAX_STEPS", 24),
-        max_topics=args.max_topics if args.max_topics is not None else _env_int(file_env, "MAX_TOPICS", 30),
+        base_url=_env_get(file_env, "BASE_URL"),
+        api_key=_env_get(file_env, "API_KEY"),
+        model=_env_get(file_env, "MODEL"),
+        doc_lang=_env_get(file_env, "DOC_LANG", "en") or "en",
+        max_steps=_env_int(file_env, "MAX_STEPS", 24),
+        max_topics=_env_int(file_env, "MAX_TOPICS", 30),
         concurrency=concurrency,
-        enable_shell=(not args.no_shell) and _env_bool(file_env, "ENABLE_SHELL", True),
-        output_dir=Path(args.output_dir).expanduser() if args.output_dir else (
+        enable_shell=_env_bool(file_env, "ENABLE_SHELL", True),
+        output_dir=(
             Path(output_dir).expanduser() if (output_dir := _env_get(file_env, "OUTPUT_DIR")) else None
         ),
         env_file=args.env_file,
@@ -985,7 +978,7 @@ def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
     ctx = {
         "workdir": str(repo),
         "os": sys.platform,
-        "lang": config.doc_lang,
+        "lang": lang_name(config.doc_lang),
         "max_topics": config.max_topics,
         "tool_usage": tool_usage_description(config.enable_shell),
     }
@@ -1001,15 +994,24 @@ def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
 
 
 def lang_code(doc_lang: str) -> str:
-    return {"Chinese": "zh", "English": "en"}.get(doc_lang, doc_lang.lower()[:2])
+    """Normalize DOC_LANG (standard code like `zh`/`en`, or a legacy name) to a code."""
+    s = doc_lang.strip().lower()
+    return {"chinese": "zh", "中文": "zh", "english": "en"}.get(s, s[:2])
+
+
+def lang_name(doc_lang: str) -> str:
+    """Human-readable language name for prompts, derived from the standard code."""
+    return {"zh": "Chinese", "en": "English"}.get(lang_code(doc_lang), doc_lang)
 
 
 def write_wiki_index(version_dir: Path, pages: list[dict], version_id: str,
-                     started: datetime, doc_lang: str, manifest: dict) -> None:
+                     started: datetime, doc_lang: str, manifest: dict,
+                     source_root: Path | None = None) -> None:
     meta = {
         "id": version_id,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "language": lang_code(doc_lang),
+        "source_root": str(source_root) if source_root else "",
         "pages": [
             {k: v for k, v in (
                 ("slug", p["slug"]), ("title", p["title"]), ("file", p["file"]),
@@ -1078,12 +1080,17 @@ def page_needs_generation(version_dir: Path, page: dict, force: bool,
     return page_sources_changed(page, manifest_diff or {"added": [], "modified": [], "removed": []})
 
 
+def version_is_incomplete(version_dir: Path, pages: list[dict]) -> bool:
+    """A version is incomplete if any page is missing, empty, or failed."""
+    return any(page_needs_generation(version_dir, p, False) for p in pages)
+
+
 def page_messages(repo: Path, config: RuntimeConfig, tree: str,
                   pages: list[dict], page: dict) -> list[dict]:
     ctx = {
         "workdir": str(repo),
         "os": sys.platform,
-        "lang": config.doc_lang,
+        "lang": lang_name(config.doc_lang),
         "max_topics": config.max_topics,
         "tool_usage": tool_usage_description(config.enable_shell),
     }
@@ -1173,11 +1180,20 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
 
     current_manifest = build_file_manifest(repo)
     tree = get_dir_structure(repo, ".", 2)
-    existing = load_current_wiki(out_dir) if (args.resume or args.page) else None
+    resume = args.resume
+    existing = load_current_wiki(out_dir) if (resume or args.page) else None
+    # Auto-resume an interrupted run instead of silently starting a duplicate version.
+    if existing is None and not resume and not args.page and not args.force:
+        candidate = load_current_wiki(out_dir)
+        if candidate and version_is_incomplete(candidate[0], candidate[1]):
+            print(f"[!] incomplete previous run at {candidate[0]}; resuming "
+                  f"(use --force to start a fresh version)", flush=True)
+            existing, resume = candidate, True
     manifest_diff = {"added": [], "modified": [], "removed": []}
     changed_count = 0
 
     settings: LLMSettings | None = None
+    prev_current: str | None = None
     if existing:
         version_dir, pages, previous_manifest = existing
         manifest_diff = diff_manifests(previous_manifest, current_manifest)
@@ -1187,8 +1203,10 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         if changed_count:
             print(f"      source changes: {changed_count} file(s)", flush=True)
     else:
-        if args.resume:
+        if resume:
             raise SystemExit(f"no resumable version found under {out_dir}; run without --resume to start a new wiki")
+        cur_ptr = out_dir / "current"
+        prev_current = cur_ptr.read_text().strip() if cur_ptr.exists() else None
         settings = resolve_provider(config)
         client = make_client(settings)
         print(
@@ -1202,7 +1220,8 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         version_id = started.astimezone().strftime("%Y-%m-%d-%H%M%S")
         version_dir = out_dir / "versions" / version_id
         version_dir.mkdir(parents=True, exist_ok=True)
-        write_wiki_index(version_dir, pages, version_id, started, config.doc_lang, current_manifest)
+        write_wiki_index(version_dir, pages, version_id, started, config.doc_lang,
+                         current_manifest, source_root=repo)
         (out_dir / "current").write_text(f"versions/{version_id}\n", encoding="utf-8")
 
     todo, skipped = plan_pages(version_dir, pages, args.page, args.force, manifest_diff)
@@ -1223,6 +1242,18 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
             write_manifest(version_dir, current_manifest)
     elif existing and args.page:
         print("      manifest not updated after single-page regeneration", flush=True)
+    # Failure protection: a fresh build that produced no pages must not replace a
+    # previously-good wiki. Restore the prior `current` pointer (or unset it).
+    if not existing and completed == 0:
+        cur_ptr = out_dir / "current"
+        if prev_current:
+            cur_ptr.write_text(prev_current + "\n", encoding="utf-8")
+            print(f"      no pages generated; kept previous wiki ({prev_current}) as current", flush=True)
+        else:
+            cur_ptr.unlink(missing_ok=True)
+            print("      no pages generated; left current unset", flush=True)
+    elif failed:
+        print("      re-run `yread generate` to retry failed pages (auto-resumes)", flush=True)
     print(f"\ndone -> {version_dir} ({completed} completed, {failed} failed, {len(skipped)} skipped)", flush=True)
     return version_dir
 

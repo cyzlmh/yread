@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import core, viewer
+from . import __version__, core, viewer
 
 
 CONFIG_DIR = Path.home() / ".yread"
@@ -60,14 +60,18 @@ def _build_parser() -> argparse.ArgumentParser:
             continue
         generate._add_action(action)
 
-    view = sub.add_parser("view", help="Browse a generated wiki")
-    view.add_argument("wiki_dir", nargs="?", help="Wiki root or version directory")
-    view.add_argument("--port", type=int, default=8000)
-    view.add_argument("--repo", default=None, help="Source repository for source links")
+    browse = sub.add_parser("browse", help="Open a generated wiki in the browser")
+    browse.add_argument("wiki_dir", nargs="?", help="Wiki root or version directory")
+    browse.add_argument("--host", default="localhost", help="Host to bind")
+    browse.add_argument("--port", type=int, default=8000)
+    browse.add_argument("--repo", default=None, help="Source repository for source links")
+
+    sub.add_parser("version", help="Print the version number")
 
     config = sub.add_parser("config", help=f"Manage {CONFIG_FILE}")
     config_sub = config.add_subparsers(dest="config_command")
 
+    config_sub.add_parser("init", help="Interactively set up the config file")
     config_sub.add_parser("path", help="Print the config file path")
     config_sub.add_parser("show", help="Print current config")
 
@@ -81,8 +85,37 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+INIT_PROMPTS = [
+    ("PROVIDER", "Provider [minimax-cn/deepseek/openai-compatible]", "openai-compatible"),
+    ("BASE_URL", "OpenAI-compatible /v1 endpoint", ""),
+    ("API_KEY", "API key", ""),
+    ("MODEL", "Model name", ""),
+    ("DOC_LANG", "Documentation language code [zh/en]", "en"),
+    ("OUTPUT_DIR", "Output directory (blank = <repo>/.yread/wiki)", ""),
+]
+
+
+def _run_config_init() -> int:
+    values = _read_config()
+    print(f"Configuring {CONFIG_FILE} (Enter keeps the shown value)\n")
+    for key, label, fallback in INIT_PROMPTS:
+        current = values.get(key, fallback)
+        suffix = f" [{current}]" if current else ""
+        entered = input(f"{label}{suffix}: ").strip()
+        chosen = entered or current
+        if chosen:
+            values[key] = chosen
+        else:
+            values.pop(key, None)
+    _write_config(values)
+    print(f"\nwrote {CONFIG_FILE}")
+    return 0
+
+
 def _run_config(args: argparse.Namespace) -> int:
     command = args.config_command or "show"
+    if command == "init":
+        return _run_config_init()
     if command == "path":
         print(CONFIG_FILE)
         return 0
@@ -107,11 +140,11 @@ def _run_config(args: argparse.Namespace) -> int:
     raise SystemExit(f"unknown config command: {command}")
 
 
-def _run_view(args: argparse.Namespace) -> int:
+def _run_browse(args: argparse.Namespace) -> int:
     viewer_args = []
     if args.wiki_dir:
         viewer_args.append(args.wiki_dir)
-    viewer_args.extend(["--port", str(args.port)])
+    viewer_args.extend(["--host", args.host, "--port", str(args.port)])
     if args.repo:
         viewer_args.extend(["--repo", args.repo])
     viewer.main(viewer_args)
@@ -121,10 +154,13 @@ def _run_view(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    if args.command == "version":
+        print(f"yread {__version__}")
+        return 0
     if args.command == "config":
         return _run_config(args)
-    if args.command == "view":
-        return _run_view(args)
+    if args.command == "browse":
+        return _run_browse(args)
     if args.command == "generate":
         config = core.config_from_args(args, config_files=[CONFIG_FILE])
         core.run_generate(args, config)

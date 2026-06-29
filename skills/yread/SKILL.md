@@ -38,10 +38,11 @@ Generate a wiki:
 yread generate /path/to/repo
 ```
 
-Generate to a specific export directory:
+Generate to a specific export directory (set in config):
 
 ```bash
-yread generate /path/to/repo --output-dir "/path/to/Obsidian Vault/Code Wikis/project"
+yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis/project"
+yread generate /path/to/repo
 ```
 
 Resume the current wiki version:
@@ -56,20 +57,21 @@ Regenerate one page:
 yread generate /path/to/repo --page <slug-or-title>
 ```
 
-Browse a wiki:
+Browse a wiki (source repo auto-resolved from wiki.json; `--repo` overrides):
 
 ```bash
-yread view /path/to/wiki --repo /path/to/repo
+yread browse /path/to/wiki
 ```
 
 ## Configuration
 
-Show or edit config:
+Set up interactively, or show/edit individual keys:
 
 ```bash
+yread config init
 yread config path
 yread config show
-yread config set DOC_LANG Chinese
+yread config set DOC_LANG zh
 yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis"
 ```
 
@@ -80,7 +82,7 @@ PROVIDER=minimax-cn | deepseek | openai-compatible
 BASE_URL=https://api.example.com/v1
 API_KEY=...
 MODEL=...
-DOC_LANG=Chinese | English
+DOC_LANG=zh | en
 OUTPUT_DIR=/path/to/export/wiki
 MAX_STEPS=24
 MAX_TOPICS=30
@@ -88,15 +90,15 @@ CONCURRENCY=1
 ENABLE_SHELL=1
 ```
 
-Precedence is: CLI flags, process environment, `--env-file`, `~/.yread/config.env`, defaults.
+Precedence is: process environment, `--env-file`, `~/.yread/config.env`, defaults.
 
 ## Agent Workflow
 
 1. Confirm the target repository path exists.
 2. Check `yread config show` when the user expects saved provider, language, or export settings.
-3. For Obsidian export, prefer `--output-dir` for one-off runs and `yread config set OUTPUT_DIR ...` for persistent behavior.
+3. For Obsidian export, set `yread config set OUTPUT_DIR ...` (config-driven, no per-run flag).
 4. Use `--resume` when a previous version exists and the user wants incremental completion.
-5. Use `yread view` only when the user wants browser inspection; generation itself writes Markdown files directly.
+5. Use `yread browse` only when the user wants browser inspection; generation itself writes Markdown files directly.
 
 ## Privacy Note
 

@@ -44,40 +44,36 @@ def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pyte
     assert settings.model == "test-model"
 
 
-def test_default_doc_language_is_english(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_doc_language_is_en(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_config_env(monkeypatch)
 
     args = yread.build_arg_parser().parse_args(["."])
     config = yread.config_from_args(args)
 
-    assert config.doc_lang == "English"
+    assert config.doc_lang == "en"
+    assert yread.lang_name(config.doc_lang) == "English"
 
 
-def test_default_config_file_and_cli_output_dir_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_config_file_drives_output_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     clear_config_env(monkeypatch)
     config_file = tmp_path / "config.env"
     configured_output = tmp_path / "obsidian" / "Yread"
-    cli_output = tmp_path / "override"
     config_file.write_text(
         "\n".join([
             "PROVIDER=openai-compatible",
             "BASE_URL=https://llm.example/v1",
             "API_KEY=test-key",
             "MODEL=test-model",
-            "DOC_LANG=English",
+            "DOC_LANG=zh",
             f"OUTPUT_DIR={configured_output}",
         ])
     )
 
-    args = yread.build_arg_parser().parse_args([".", "--output-dir", str(cli_output)])
-    config = yread.config_from_args(args, config_files=[config_file])
-
-    assert config.doc_lang == "English"
-    assert config.output_dir == cli_output
-
     args = yread.build_arg_parser().parse_args(["."])
     config = yread.config_from_args(args, config_files=[config_file])
 
+    assert config.doc_lang == "zh"
+    assert yread.lang_name(config.doc_lang) == "Chinese"
     assert config.output_dir == configured_output
 
 
@@ -103,6 +99,57 @@ def test_cli_config_set_show_and_unset(tmp_path: Path, monkeypatch: pytest.Monke
     capsys.readouterr()
     assert cli.main(["config", "show"]) == 0
     assert "DOC_LANG=English" not in capsys.readouterr().out
+
+
+def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
+    from yread import __version__
+
+    assert cli.main(["version"]) == 0
+    assert __version__ in capsys.readouterr().out
+
+
+def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                         capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path / ".yread")
+    monkeypatch.setattr(cli, "CONFIG_FILE", tmp_path / ".yread" / "config.env")
+    answers = iter(["deepseek", "https://api.deepseek.com/v1", "sk-test", "deepseek-v4-pro", "zh", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert cli.main(["config", "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "PROVIDER=deepseek" in out
+    assert "DOC_LANG=zh" in out
+    assert "OUTPUT_DIR" not in out  # left blank -> not written
+
+
+def test_version_is_incomplete(tmp_path: Path) -> None:
+    pages = [
+        {"slug": "a", "file": "a.md", "title": "A"},
+        {"slug": "b", "file": "b.md", "title": "B"},
+    ]
+    (tmp_path / "a.md").write_text("# A\n\nbody\n")
+    assert yread.version_is_incomplete(tmp_path, pages) is True  # b.md missing
+
+    (tmp_path / "b.md").write_text("# B\n\n> This page failed to generate: x\n")
+    assert yread.version_is_incomplete(tmp_path, pages) is True  # b.md is a failure stub
+
+    (tmp_path / "b.md").write_text("# B\n\nbody\n")
+    assert yread.version_is_incomplete(tmp_path, pages) is False
+
+
+def test_wiki_index_records_source_root(tmp_path: Path) -> None:
+    import json
+    from datetime import datetime, timezone
+
+    version_dir = tmp_path / "v1"
+    version_dir.mkdir()
+    pages = [{"slug": "a", "file": "a.md", "title": "A", "section": "S"}]
+    yread.write_wiki_index(version_dir, pages, "v1", datetime.now(timezone.utc),
+                           "en", {}, source_root=tmp_path / "repo")
+    meta = json.loads((version_dir / "wiki.json").read_text())
+    assert meta["source_root"] == str(tmp_path / "repo")
 
 
 def test_cli_requires_explicit_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
