@@ -39,21 +39,22 @@ Agents only receive three read-only tools:
 | --- | --- |
 | `get_dir_structure` | Show a filtered directory tree |
 | `view_file_in_detail` | Read source files by line range |
-| `run_bash` | Run conservative read-only commands; can be disabled with `--no-shell` |
+| `run_bash` | Run conservative read-only commands; disable with `ENABLE_SHELL=0` |
 
 ## Install and Run
 
-From a checkout:
+From a checkout, `generate` defaults to the current directory:
 
 ```bash
-uv run yread generate /path/to/repo
+cd /path/to/repo
+uv run yread generate          # or: uv run yread generate /path/to/repo
 ```
 
 Install as a uv tool:
 
 ```bash
 uv tool install .
-yread generate /path/to/repo
+cd /path/to/repo && yread generate
 ```
 
 Output defaults to:
@@ -77,8 +78,10 @@ For a generic OpenAI-compatible provider:
 ```bash
 cp .env.yread.example .env.yread
 $EDITOR .env.yread
-uv run yread generate /path/to/repo --env-file .env.yread --concurrency 3
+uv run yread generate /path/to/repo --env-file .env.yread
 ```
+
+All tunables (provider, model, language, concurrency, output) live in config rather than on the `generate` command, keeping the command surface lean.
 
 Persistent config lives at:
 
@@ -86,7 +89,13 @@ Persistent config lives at:
 ~/.yread/config.env
 ```
 
-Manage it with:
+Set it up interactively:
+
+```bash
+yread config init
+```
+
+Or manage individual keys:
 
 ```bash
 yread config path
@@ -94,14 +103,14 @@ yread config set PROVIDER openai-compatible
 yread config set BASE_URL https://api.example.com/v1
 yread config set API_KEY sk-...
 yread config set MODEL your-model
-yread config set DOC_LANG English
+yread config set DOC_LANG en
 yread config show
 ```
 
 Config precedence is:
 
 ```text
-CLI flags > process environment > --env-file > ~/.yread/config.env > defaults
+process environment > --env-file > ~/.yread/config.env > defaults
 ```
 
 | Key | Default | Description |
@@ -110,7 +119,7 @@ CLI flags > process environment > --env-file > ~/.yread/config.env > defaults
 | `BASE_URL` | auto-resolved | OpenAI-compatible `/v1` endpoint |
 | `API_KEY` | auto-resolved | Provider API key |
 | `MODEL` | provider default | Model name |
-| `DOC_LANG` | `English` | Documentation language |
+| `DOC_LANG` | `en` | Documentation language code, e.g. `zh`, `en` |
 | `MAX_STEPS` | `24` | Max tool-call rounds per agent |
 | `MAX_TOPICS` | `30` | Catalog topic cap |
 | `CONCURRENCY` | `1` | Parallel page agents |
@@ -128,15 +137,15 @@ yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis/yread"
 yread generate /path/to/repo
 ```
 
-Or override it for one run:
-
-```bash
-yread generate /path/to/repo --output-dir "/path/to/Obsidian Vault/Code Wikis/project-a"
-```
-
 ## Resume and Regenerate
 
-Resume the current wiki version and regenerate only missing, failed, or source-affected pages:
+If a previous run was interrupted or left failed pages, a plain `yread generate`
+auto-detects the incomplete version and resumes it instead of starting a new one
+(use `--force` to start fresh). A build that produces no pages never replaces a
+previously-good wiki.
+
+Explicitly resume the current version, regenerating only missing, failed, or
+source-affected pages:
 
 ```bash
 yread generate /path/to/repo --resume
@@ -148,16 +157,25 @@ Regenerate one page by slug, title, or Markdown filename:
 yread generate /path/to/repo --page 1-overview
 ```
 
-Disable shell access for agents:
+Disable shell access for agents (config-only):
 
 ```bash
-yread generate /path/to/repo --no-shell
+yread config set ENABLE_SHELL 0
 ```
 
 ## Browse Locally
 
+The source repository is recorded in `wiki.json` at generation time, so source
+citations resolve automatically — from inside the repo, just run:
+
 ```bash
-uv run yread view /path/to/repo/.yread/wiki --repo /path/to/repo --port 8000
+yread browse                       # serves ./.yread/wiki
+```
+
+Or point at a wiki explicitly; `--repo` overrides the recorded source root:
+
+```bash
+uv run yread browse /path/to/repo/.yread/wiki --host localhost --port 8000
 ```
 
 ## Codex Skill
