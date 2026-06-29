@@ -43,18 +43,23 @@ Agents only receive three read-only tools:
 
 ## Install and Run
 
-From a checkout, `generate` defaults to the current directory:
+Install from PyPI:
+
+```bash
+uv tool install yread        # or: pipx install yread, pip install yread
+```
+
+`generate` defaults to the current directory:
 
 ```bash
 cd /path/to/repo
-uv run yread generate          # or: uv run yread generate /path/to/repo
+yread generate               # or: yread generate /path/to/repo
 ```
 
-Install as a uv tool:
+From a checkout, run without installing:
 
 ```bash
-uv tool install .
-cd /path/to/repo && yread generate
+uv run yread generate /path/to/repo
 ```
 
 Output defaults to:
