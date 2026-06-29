@@ -105,9 +105,12 @@ def test_cli_config_set_show_and_unset(tmp_path: Path, monkeypatch: pytest.Monke
     assert "DOC_LANG=English" not in capsys.readouterr().out
 
 
-def test_cli_accepts_repo_path_without_generate_subcommand() -> None:
-    assert cli._normalize_argv(["/tmp/repo"]) == ["generate", "/tmp/repo"]
-    assert cli._normalize_argv(["generate", "/tmp/repo"]) == ["generate", "/tmp/repo"]
+def test_cli_requires_explicit_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main([]) == 0
+    assert "generate" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit):
+        cli.main(["/tmp/repo"])
 
 
 def test_readonly_bash_allows_simple_reads_and_rejects_unsafe_commands(tmp_path: Path) -> None:

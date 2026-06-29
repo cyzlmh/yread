@@ -13,7 +13,6 @@ dependencies = [
 
 [project.scripts]
 yread = "yread.cli:main"
-yread-view = "yread.viewer:main"
 
 [build-system]
 requires = ["hatchling"]

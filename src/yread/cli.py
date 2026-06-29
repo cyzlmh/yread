@@ -81,15 +81,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _normalize_argv(argv: list[str]) -> list[str]:
-    if not argv:
-        return argv
-    commands = {"generate", "view", "config", "-h", "--help"}
-    if argv[0] not in commands:
-        return ["generate", *argv]
-    return argv
-
-
 def _run_config(args: argparse.Namespace) -> int:
     command = args.config_command or "show"
     if command == "path":
@@ -129,12 +120,12 @@ def _run_view(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(_normalize_argv(list(sys.argv[1:] if argv is None else argv)))
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.command == "config":
         return _run_config(args)
     if args.command == "view":
         return _run_view(args)
-    if args.command in {"generate", None}:
+    if args.command == "generate":
         config = core.config_from_args(args, config_files=[CONFIG_FILE])
         core.run_generate(args, config)
         return 0

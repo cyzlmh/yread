@@ -49,12 +49,6 @@ From a checkout:
 uv run yread generate /path/to/repo
 ```
 
-The first positional argument also defaults to `generate`:
-
-```bash
-uv run yread /path/to/repo
-```
-
 Install as a uv tool:
 
 ```bash
@@ -164,12 +158,6 @@ yread generate /path/to/repo --no-shell
 
 ```bash
 uv run yread view /path/to/repo/.yread/wiki --repo /path/to/repo --port 8000
-```
-
-Installed command:
-
-```bash
-yread-view /path/to/repo/.yread/wiki --repo /path/to/repo --port 8000
 ```
 
 ## Codex Skill
