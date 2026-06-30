@@ -47,7 +47,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from openai import OpenAI
-from pypinyin import lazy_pinyin
 
 
 IGNORE = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__",
@@ -790,8 +789,10 @@ def parse_catalog(text: str) -> list[dict]:
 
 
 def slugify(index: int, title: str) -> str:
-    tokens = lazy_pinyin(title)
-    body = re.sub(r"[^a-z0-9]+", "-", " ".join(tokens).lower()).strip("-")
+    # Keep word characters (Unicode letters/digits/underscore, so CJK titles stay
+    # readable instead of being romanized). Collapse any other run (spaces,
+    # punctuation, filename-hostile chars like / \ : * ? " < > |) into one hyphen.
+    body = re.sub(r"[^\w]+", "-", title, flags=re.UNICODE).strip("-")
     return f"{index}-{body}" if body else f"{index}"
 
 

@@ -198,7 +198,8 @@ Agent 循环
     pages = yread.assign_page_fields(yread.parse_catalog(raw))
 
     assert [p["title"] for p in pages] == ["项目概览", "Agent 循环"]
-    assert pages[0]["slug"] == "1-xiang-mu-gai-lan"
+    assert pages[0]["slug"] == "1-项目概览"
+    assert pages[1]["slug"] == "2-Agent-循环"
     assert pages[0]["associatedFiles"] == ["README.md", "src/yread/core.py"]
     assert pages[1]["group"] == "Internals"
 

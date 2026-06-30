@@ -1,6 +1,6 @@
 [project]
 name = "yread"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local lightweight repo-to-wiki generator inspired by zread."
 readme = "README.md"
 authors = [
@@ -12,7 +12,6 @@ license-files = ["LICENSE"]
 dependencies = [
     "markdown>=3.6",
     "openai>=1.30",
-    "pypinyin>=0.51",
 ]
 keywords = ["wiki", "documentation", "codebase", "llm", "cli"]
 classifiers = [
