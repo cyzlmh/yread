@@ -2,9 +2,7 @@
 
 > Turn a local source repository into a structured Markdown wiki.
 
-`yread` is a lightweight, installable Python CLI inspired by zread. It uses a two-phase LLM workflow to inspect a local repository, plan a wiki outline, and write one Markdown page per topic.
-
-The `y` is intentional: it is zread's alphabet neighbor, and it also hints at "yet another" small local implementation.
+`yread` is a lightweight, installable Python CLI — turn a local repository into a structured Markdown wiki, powered by LLMs. Inspired by [zread](https://zread.ai).
 
 ## Why
 
