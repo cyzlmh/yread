@@ -1,10 +1,11 @@
 # Overview
 
-`yread` turns a local source repository into a structured Markdown wiki. It first builds a catalog, then starts independent page agents to inspect code and write focused documentation.
+`yread` turns a local source repository into an architecture-first Markdown wiki. It first builds a project profile and catalog, then starts independent page agents to inspect evidence files and write focused documentation for human understanding.
 
 ```mermaid
 flowchart LR
-    Repo[Local repository] --> Catalog[Catalog Agent]
+    Repo[Local repository] --> Profile[Project Profile]
+    Profile --> Catalog[Catalog Agent]
     Catalog --> WikiJson[wiki.json]
     WikiJson --> PageAgents[Page Agents]
     PageAgents --> Pages[Markdown pages]

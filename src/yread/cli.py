@@ -18,6 +18,7 @@ CONFIG_KEYS = {
     "API_KEY",
     "MODEL",
     "DOC_LANG",
+    "DOC_DEPTH",
     "MAX_STEPS",
     "MAX_TOPICS",
     "CONCURRENCY",
@@ -91,6 +92,7 @@ INIT_PROMPTS = [
     ("API_KEY", "API key", ""),
     ("MODEL", "Model name", ""),
     ("DOC_LANG", "Documentation language code [zh/en]", "en"),
+    ("DOC_DEPTH", "Documentation depth [auto/brief/standard/deep]", "auto"),
     ("OUTPUT_DIR", "Output directory (blank = <repo>/.yread/wiki)", ""),
 ]
 

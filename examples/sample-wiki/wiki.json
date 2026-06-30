@@ -1,15 +1,36 @@
 {
+  "schema_version": 2,
   "id": "sample",
   "generated_at": "2026-06-29T00:00:00.000000Z",
   "language": "en",
+  "doc_depth": "brief",
+  "project_profile": {
+    "total_files": 8,
+    "source_files": 3,
+    "primary_languages": [
+      "Python"
+    ],
+    "max_depth": 3,
+    "has_readme": true,
+    "has_tests": true,
+    "has_ci": false,
+    "package_files": [
+      "pyproject.toml"
+    ],
+    "entry_points": [
+      "src/yread/cli.py"
+    ]
+  },
+  "source_root": "",
   "pages": [
     {
       "slug": "1-overview",
       "title": "Overview",
       "file": "1-overview.md",
       "section": "Get Started",
+      "kind": "overview",
       "level": "Beginner",
-      "associatedFiles": [
+      "evidenceFiles": [
         "README.md",
         "pyproject.toml"
       ]
@@ -18,10 +39,11 @@
       "slug": "2-agent-pipeline",
       "title": "Agent Pipeline",
       "file": "2-agent-pipeline.md",
-      "section": "Deep Dive",
-      "group": "Core Mechanics",
+      "section": "Architecture",
+      "group": "Core Model",
+      "kind": "architecture",
       "level": "Intermediate",
-      "associatedFiles": [
+      "evidenceFiles": [
         "src/yread/core.py"
       ]
     }

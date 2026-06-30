@@ -3,9 +3,9 @@
     yread browse [wiki_dir] [--host localhost] [--port 8000] [--repo <repo_path>]
 
 wiki_dir defaults to ./.yread/wiki. If it holds a `current` pointer the latest
-version is served; a version dir (with wiki.json) also works directly.
+version is served; a version dir (with a v2 wiki.json) also works directly.
 
-Renders each page's markdown with mermaid diagrams, a section/level sidebar from
+Renders each page's markdown with mermaid diagrams, a section/kind sidebar from
 wiki.json, and resolves the inter-page `[title](slug)` cross-links. The source
 repo recorded in wiki.json (`source_root`) makes `Sources: [file](path#Lx-Ly)`
 citations link to the real files; pass --repo to override it.
@@ -77,7 +77,8 @@ def build_nav(pages, active):
         if grp and grp != last_grp:
             last_grp = grp; out.append(f'<div class="grp">{grp}</div>')
         cls = " active" if p["slug"] == active else ""
-        lv = f'<span class="lv">{p.get("level","")}</span>' if p.get("level") else ""
+        meta = p.get("kind") or p.get("level", "")
+        lv = f'<span class="lv">{meta}</span>' if meta else ""
         out.append(f'<a class="page{cls}" href="/p/{p["slug"]}">{p["title"]}{lv}</a>')
     return "\n".join(out)
 
@@ -160,6 +161,8 @@ def main(argv: list[str] | None = None):
         else: wiki_arg = args[i]; i += 1
     wiki = resolve_wiki(wiki_arg)
     meta = json.loads((wiki / "wiki.json").read_text())
+    if meta.get("schema_version") != 2:
+        raise SystemExit(f"unsupported wiki schema under {wiki}: expected schema_version 2")
     if repo is None and meta.get("source_root"):
         recorded = Path(meta["source_root"])
         if recorded.is_dir():

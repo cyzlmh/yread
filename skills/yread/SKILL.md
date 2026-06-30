@@ -1,15 +1,15 @@
 ---
 name: yread
-description: Use when a user wants to generate a Markdown wiki from a local source repository with yread, export that wiki to a notes directory such as Obsidian, resume or regenerate yread output, configure yread, or browse an existing yread wiki.
+description: Use when a user wants to generate an architecture-first Markdown wiki from a local source repository with yread, export that wiki to a notes directory such as Obsidian, resume or regenerate yread output, configure yread, or browse an existing yread wiki.
 ---
 
 # yread
 
-Use this skill when the user wants to turn a local source repository into a readable Markdown wiki, export that wiki to a notes directory such as Obsidian, resume a previous yread run, or browse an existing yread wiki.
+Use this skill when the user wants to turn a local source repository into an architecture-first Markdown wiki, export that wiki to a notes directory such as Obsidian, resume a previous yread run, or browse an existing yread wiki.
 
 ## What yread Does
 
-yread analyzes a local repository with an LLM-driven catalog phase and per-page writing phase. It writes a versioned Markdown wiki with `wiki.json`, `manifest.json`, `SUMMARY.md`, and one Markdown file per topic.
+yread analyzes a local repository with a lightweight project profile, an LLM-driven catalog phase, and per-page writing phase. It writes a v2 versioned Markdown wiki with `wiki.json`, `manifest.json`, `SUMMARY.md`, and one Markdown file per architecture-first topic.
 
 Default output is:
 
@@ -83,6 +83,7 @@ BASE_URL=https://api.example.com/v1
 API_KEY=...
 MODEL=...
 DOC_LANG=zh | en
+DOC_DEPTH=auto | brief | standard | deep
 OUTPUT_DIR=/path/to/export/wiki
 MAX_STEPS=24
 MAX_TOPICS=30
@@ -97,7 +98,7 @@ Precedence is: process environment, `--env-file`, `~/.yread/config.env`, default
 1. Confirm the target repository path exists.
 2. Check `yread config show` when the user expects saved provider, language, or export settings.
 3. For Obsidian export, set `yread config set OUTPUT_DIR ...` (config-driven, no per-run flag).
-4. Use `--resume` when a previous version exists and the user wants incremental completion.
+4. Use `--resume` when a previous v2 version exists and the user wants incremental completion.
 5. Use `yread browse` only when the user wants browser inspection; generation itself writes Markdown files directly.
 
 ## Privacy Note

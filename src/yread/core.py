@@ -17,6 +17,7 @@ Config via env:
     API_KEY     override the key              (else resolved per provider)
     MODEL       override the model name       (else the provider's default)
     DOC_LANG    documentation language code  (default en; e.g. zh | en; NOT $LANG)
+    DOC_DEPTH   documentation depth          (default auto; auto | brief | standard | deep)
     MAX_STEPS   tool-call rounds per agent   (default 24)
     MAX_TOPICS  catalog topic cap            (default 30)
     CONCURRENCY parallel page agents          (default 1)
@@ -42,7 +43,7 @@ import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +60,48 @@ SENSITIVE_NAMES = {
 }
 SENSITIVE_GLOBS = ("*.pem", "*.key", "*.p12", "*.pfx")
 
+DOC_DEPTHS = {"auto", "brief", "standard", "deep"}
+TOPIC_KINDS = {
+    "overview", "quickstart", "architecture", "concepts", "runtime-flow",
+    "extension-points", "tradeoffs", "change-guide", "reference",
+}
+REQUIRED_TOPIC_KINDS = {"overview"}
+
+SOURCE_EXTENSIONS = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".java": "Java",
+    ".kt": "Kotlin",
+    ".cs": "C#",
+    ".cpp": "C++",
+    ".cxx": "C++",
+    ".cc": "C++",
+    ".c": "C",
+    ".h": "C/C++",
+    ".hpp": "C++",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".swift": "Swift",
+    ".scala": "Scala",
+    ".sh": "Shell",
+}
+
+PACKAGE_FILES = (
+    "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml",
+    "build.gradle", "build.gradle.kts", "Gemfile", "composer.json",
+)
+ENTRYPOINT_PATTERNS = (
+    "main.py", "app.py", "server.py", "cli.py", "__main__.py",
+    "src/main.py", "src/app.py", "src/server.py",
+    "src/main.ts", "src/main.tsx", "src/index.ts", "src/index.tsx",
+    "src/main.js", "src/index.js", "cmd", "main.go",
+)
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -67,6 +110,7 @@ class RuntimeConfig:
     api_key: str | None
     model: str | None
     doc_lang: str
+    doc_depth: str
     max_steps: int
     max_topics: int
     concurrency: int
@@ -81,6 +125,19 @@ class LLMSettings:
     base_url: str
     api_key: str
     model: str
+
+
+@dataclass(frozen=True)
+class ProjectProfile:
+    total_files: int
+    source_files: int
+    primary_languages: list[str]
+    max_depth: int
+    has_readme: bool
+    has_tests: bool
+    has_ci: bool
+    package_files: list[str]
+    entry_points: list[str]
 
 
 def load_pi_provider(name: str) -> tuple[str, str]:
@@ -157,6 +214,13 @@ def _env_int(file_env: dict[str, str], name: str, default: int) -> int:
         raise SystemExit(f"{name} must be an integer, got {raw!r}") from e
 
 
+def _env_choice(file_env: dict[str, str], name: str, default: str, choices: set[str]) -> str:
+    raw = (_env_get(file_env, name, default) or default).strip().lower()
+    if raw not in choices:
+        raise SystemExit(f"{name} must be one of: {', '.join(sorted(choices))}")
+    return raw
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Turn a local repository into a lightweight structured wiki.",
@@ -194,6 +258,7 @@ def config_from_args(args: argparse.Namespace, config_files: list[Path] | None =
         api_key=_env_get(file_env, "API_KEY"),
         model=_env_get(file_env, "MODEL"),
         doc_lang=_env_get(file_env, "DOC_LANG", "en") or "en",
+        doc_depth=_env_choice(file_env, "DOC_DEPTH", "auto", DOC_DEPTHS),
         max_steps=_env_int(file_env, "MAX_STEPS", 24),
         max_topics=_env_int(file_env, "MAX_TOPICS", 30),
         concurrency=concurrency,
@@ -295,6 +360,20 @@ def normalize_source_paths(repo: Path, paths: list[str]) -> list[str]:
     return result
 
 
+def normalize_evidence_files(repo: Path, paths: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in paths:
+        rel = _relative_source_path(repo, path)
+        if not rel or rel in seen:
+            continue
+        candidate = repo / rel
+        if candidate.exists():
+            seen.add(rel)
+            result.append(rel)
+    return result
+
+
 def iter_source_files(repo: Path) -> list[Path]:
     ignore = IGNORE | _gitignore_names(repo)
     files: list[Path] = []
@@ -335,6 +414,111 @@ def build_file_manifest(repo: Path) -> dict:
     }
 
 
+def build_project_profile(repo: Path) -> ProjectProfile:
+    repo = repo.resolve()
+    files = iter_source_files(repo)
+    rel_paths = [p.relative_to(repo).as_posix() for p in files]
+    language_counts: dict[str, int] = {}
+    source_files = 0
+    max_depth = 0
+    for rel in rel_paths:
+        path = Path(rel)
+        max_depth = max(max_depth, len(path.parts))
+        lang = SOURCE_EXTENSIONS.get(path.suffix.lower())
+        if lang:
+            source_files += 1
+            language_counts[lang] = language_counts.get(lang, 0) + 1
+    primary_languages = [
+        lang for lang, _count in sorted(language_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+    ]
+    package_files = [name for name in PACKAGE_FILES if (repo / name).is_file()]
+    entry_points = _detect_entry_points(repo, rel_paths, package_files)
+    has_readme = any(Path(path).name.lower().startswith("readme") for path in rel_paths)
+    has_tests = any(
+        path == "tests" or path.startswith("tests/") or Path(path).name.startswith("test_")
+        or Path(path).name.endswith(".test.ts") or Path(path).name.endswith(".test.js")
+        for path in rel_paths
+    )
+    has_ci = (repo / ".github" / "workflows").is_dir() or any(
+        path in {".gitlab-ci.yml", "azure-pipelines.yml"} for path in rel_paths
+    )
+    return ProjectProfile(
+        total_files=len(files),
+        source_files=source_files,
+        primary_languages=primary_languages,
+        max_depth=max_depth,
+        has_readme=has_readme,
+        has_tests=has_tests,
+        has_ci=has_ci,
+        package_files=package_files,
+        entry_points=entry_points[:8],
+    )
+
+
+def _detect_entry_points(repo: Path, rel_paths: list[str], package_files: list[str]) -> list[str]:
+    seen: set[str] = set()
+    entries: list[str] = []
+
+    def add(path: str) -> None:
+        rel = _relative_source_path(repo, path)
+        if rel and rel in rel_paths and rel not in seen:
+            seen.add(rel)
+            entries.append(rel)
+
+    for rel in rel_paths:
+        name = Path(rel).name
+        if rel in ENTRYPOINT_PATTERNS or name in ENTRYPOINT_PATTERNS:
+            add(rel)
+        elif rel.startswith("src/") and name in {"cli.py", "__main__.py", "main.go"}:
+            add(rel)
+
+    if "pyproject.toml" in package_files:
+        text = (repo / "pyproject.toml").read_text(errors="replace")
+        for module in re.findall(r"=\s*\"([A-Za-z_][\w.]*):", text):
+            candidate = "src/" + module.replace(".", "/") + ".py"
+            add(candidate)
+
+    if "package.json" in package_files:
+        try:
+            pkg = json.loads((repo / "package.json").read_text(errors="replace"))
+        except json.JSONDecodeError:
+            pkg = {}
+        for key in ("main", "module", "browser"):
+            if isinstance(pkg.get(key), str):
+                add(pkg[key])
+        bin_value = pkg.get("bin")
+        if isinstance(bin_value, str):
+            add(bin_value)
+        elif isinstance(bin_value, dict):
+            for value in bin_value.values():
+                if isinstance(value, str):
+                    add(value)
+
+    return entries
+
+
+def resolve_doc_depth(profile: ProjectProfile, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if profile.source_files <= 20 and profile.total_files <= 40:
+        return "brief"
+    if profile.source_files >= 120 or profile.total_files >= 250 or profile.max_depth >= 6:
+        return "deep"
+    return "standard"
+
+
+def topic_budget_for_depth(depth: str, max_topics: int) -> int:
+    if depth == "brief":
+        return min(max_topics, 5)
+    if depth == "standard":
+        return min(max_topics, 15)
+    return max_topics
+
+
+def profile_summary(profile: ProjectProfile) -> str:
+    return json.dumps(asdict(profile), ensure_ascii=False, indent=2)
+
+
 def load_manifest(version_dir: Path) -> dict | None:
     path = version_dir / "manifest.json"
     if not path.exists():
@@ -367,7 +551,7 @@ def _path_affects_source(source: str, changed_path: str) -> bool:
 
 
 def page_sources_changed(page: dict, diff: dict[str, list[str]]) -> bool:
-    sources = page.get("associatedFiles") or []
+    sources = page.get("evidenceFiles") or []
     if not sources:
         return False
     changed = diff["added"] + diff["modified"] + diff["removed"]
@@ -589,7 +773,7 @@ def tool_usage_description(enable_shell: bool) -> str:
 # Phase 1 — catalog                                                           #
 # --------------------------------------------------------------------------- #
 
-CATALOG_SYSTEM = """You are an expert software engineer and technical writer with deep experience in deconstructing complex codebases. Your specialty is not just reading code, but understanding its design philosophy, identifying its target audience, and communicating its essence in a clear, structured, and user-oriented manner.
+CATALOG_SYSTEM = """You are an expert software architect and technical writer. Your job is to plan documentation for humans who need to understand a codebase: its purpose, architecture, concepts, runtime flow, extension points, design tradeoffs, and safe change paths.
 
 ## Environment
 - Working directory: {workdir}
@@ -600,84 +784,66 @@ You have the following tools to gather information about the local repository:
 <description>
 {tool_usage}
 </description>
-If you already have enough information, just respond without calling tools.
-ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
+If you already have enough information, respond without calling tools.
+Always follow the tool call schema exactly.
 
-## Analysis Framework
-You always follow these four steps meticulously to deconstructing a complex codebase.
-<guidance>
-### Step 1: High-Level Vision & Value (The "Why")
-Begin by establishing the strategic context of the repository. Answer the foundational questions before diving into the code.
-*   **Core Purpose & Value Proposition:**
-    *   What specific problem does this repository solve? State it clearly and concisely.
-    *   For a developer investing time to study this codebase, what are the key takeaways and transferable skills they can expect to learn?
+## Documentation Philosophy
+This wiki is not a source-code encyclopedia. Do not plan pages that merely summarize files, folders, functions, parameters, or classes. Plan pages that help a developer build a correct mental model:
+- What problem does the project solve?
+- What are the core abstractions and domain concepts?
+- What are the main control/data flows?
+- Where are the architectural boundaries and adapters?
+- What are the extension points and safe change paths?
+- What tradeoffs, constraints, and maintenance risks should a human know?
 
-### Step 2: Architectural Deep Dive (The "What" & "How")
-Deconstruct the repository's structure and implementation. Focus on the technical design and how it achieves its purpose.
-*   **Architectural Overview:**
-    *   Describe the high-level architecture.
-    *   What are the core modules or directories? For each one, define its single responsibility.
-*   **Key Modules & Implementation:**
-    *   Identify the 2-3 most critical modules that form the heart of this repository.
-    *   How do these key modules interact with each other?
+Use source paths only as evidence for a topic. They are not the topic itself.
 
-### Step 3: Audience-Centric Analysis (The "Who")
-Tailor your analysis to the end-users of the documentation. Identify the primary audience:
-*   **Frontend Developers:** UI components, framework integration, state management, performance.
-*   **Backend Developers:** API design, database schemas, scalability, security, concurrency, deployment.
-*   **Algorithm Engineers/Researchers:** Core algorithm correctness, efficiency, mathematical foundations.
-*   **Learners/Students:** Clear explanations, step-by-step tutorials, logical progression.
+## Catalog Contract
+1. Output v2 topics only. Every topic MUST use:
+   `<topic kind="..." level="..." files="...">`
+2. `kind` MUST be exactly one of:
+   overview, quickstart, architecture, concepts, runtime-flow, extension-points, tradeoffs, change-guide, reference
+3. `level` should be Beginner, Intermediate, or Advanced.
+4. `files` must contain 1-4 exact relative files or directories that support the page as evidence.
+5. Do not include generated output, dependency directories, secret files, absolute paths, or paths outside the repository.
+6. Keep titles concise. Prefer architecture concepts and maintenance tasks over file names.
+7. Total topic count must not exceed {topic_budget}. Merge or omit lower-value topics to stay within this budget.
 
-### Step 4: Synthesize & Structure the Output (The "How to Present")
-Now, compile your findings into a final, well-structured document catalog.
-*   **Structural Rules:**
-    *   **Create a Logical Hierarchy:** Use clear, descriptive headings.
-    *   **Abstract, Don't Mirror:** Do not use file or folder names as headings. Create meaningful topic titles.
-    *   **Be Concise and Accurate:** Ensure every title is a perfect summary of the section's content.
-*   **Final Output Structure:**
-1. Structure the outline into **sections** strictly as below:
-   - `Get Started`: onboarding content, quick wins (tutorials, setup, usage)
-     - The first two topics under this section must be:
-       - `Overview`: a high-level summary of what the project does and why it matters
-       - `Quick Start`: step-by-step setup to run or try out the project
-   - `Deep Dive`: technical explanation and reference material (concepts, architecture, APIs)
-2. Within each `<section>`, you may include `<topic level="...">` and optional `<group>` to cluster related topics.
-   - Each topic must include its difficulty level: Beginner, Intermediate, or Advanced
-   - Each topic should include `files="..."` with 1-4 exact relative source files or directories that best support that page.
-   - Do not include generated output, dependency directories, secret files, or absolute paths in `files`.
-3. **Total topic count must not exceed {max_topics}.** Prioritize the most important topics. Merge or omit less critical topics to stay within this limit.
-</guidance>
+## Depth Policy
+Requested documentation depth: {doc_depth}
+- brief: prioritize Overview, Architecture Map, and one practical change path.
+- standard: add Core Concepts, Runtime Flow, Extension Points, and Design Tradeoffs where supported by evidence.
+- deep: expand important subsystems and maintenance paths, but still avoid file-by-file documentation.
 
-### Output Example
-Analyse the repository deeply first, then provide a comprehensive catalog. Your output must follow **this exact pattern**:
+## Required Priority
+At minimum, include one `overview` topic if supported by any evidence. Prefer also including `architecture`, `concepts`, `runtime-flow`, and `extension-points` when the project has enough substance.
+
+## Output Example
+Output ONLY the catalog. Use this exact pattern:
 
 <section>
 Section Name
-<topic level="..." files="README.md, pyproject.toml">
-Topic A
+<topic kind="overview" level="Beginner" files="README.md, pyproject.toml">
+Project Overview
 </topic>
 <group>
-Group Name
-<topic level="..." files="src/main.py, src/runtime/">
-Topic B
+Architecture
+<topic kind="architecture" level="Intermediate" files="src/main.py, src/runtime/">
+Architecture Map
 </topic>
-<topic level="..." files="tests/">
-Topic C
+<topic kind="runtime-flow" level="Intermediate" files="src/runtime/, tests/">
+Runtime Flow
 </topic>
 </group>
-</section>
-
-<section>
-…
 </section>"""
 
-CATALOG_USER = """Produce a comprehensive document catalog that serves as a high-quality guide for developers of this local repository.
+CATALOG_USER = """Produce a v2 architecture-first document catalog for this local repository.
 
 ## Instructions
 1. Use `get_dir_structure` to understand the project layout. For deeply nested repos, expand folders as needed.
 2. Use `view_file_in_detail` to read key source files (README, entry points, core modules).
-3. If available, use `run_bash` to run read-only commands for additional insights (e.g., finding entry points, listing file types).
-4. Before each tool call, think carefully about what you observed in the previous result and what you need next.
+3. If available, use `run_bash` to run read-only commands for additional insights.
+4. Plan for human architectural understanding, not code detail reproduction.
 
 ## Your Task
 Information about the current repository:
@@ -685,21 +851,26 @@ Information about the current repository:
 Working directory: {workdir}
 Operating system: {os}
 Documentation language: {lang}
+Documentation depth: {doc_depth}
+Topic budget: {topic_budget}
 
 Repository structure (top levels):
 {tree}
+
+Project profile:
+{project_profile}
 </metadata>
 
-Output ONLY the document catalog, without any explanation or comments. Use {lang} as the language for all section names and topic titles. The total number of topics must not exceed {max_topics}. Each topic must include `files="..."` with 1-4 relative source files or directories that support the page. Structure each section like this:
+Output ONLY the document catalog, without explanation or comments. Use {lang} for section names and topic titles. Keep `kind` values in English exactly as specified. The total number of topics must not exceed {topic_budget}. Each topic must include `kind`, `level`, and `files`.
 
 <section>
 Section Name
-<topic level="..." files="README.md, src/main.py">
+<topic kind="overview" level="Beginner" files="README.md, src/main.py">
 Topic Title
 </topic>
 <group>
 Group Name
-<topic level="..." files="src/runtime/">
+<topic kind="architecture" level="Intermediate" files="src/runtime/">
 Topic Title
 </topic>
 </group>
@@ -710,7 +881,7 @@ def _parse_tag_attrs(line: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in re.finditer(r'([A-Za-z_]+)="([^"]*)"', line)}
 
 
-def _split_associated_files(raw: str) -> list[str]:
+def _split_path_list(raw: str) -> list[str]:
     parts = []
     for item in re.split(r"[,;\n]", raw):
         item = item.strip().strip("-* ").strip().strip("`'\"")
@@ -720,7 +891,7 @@ def _split_associated_files(raw: str) -> list[str]:
 
 
 def parse_catalog(text: str) -> list[dict]:
-    """Parse the <section>/<group>/<topic> outline into an ordered page list."""
+    """Parse the v2 <section>/<group>/<topic> outline into an ordered page list."""
     pages: list[dict] = []
     section = group = ""
     topic: dict | None = None
@@ -728,8 +899,18 @@ def parse_catalog(text: str) -> list[dict]:
 
     def finish_topic() -> None:
         nonlocal topic
-        if topic and topic.get("title"):
-            topic["associatedFiles"] = _split_associated_files("\n".join(topic.get("associatedFiles", [])))
+        if topic:
+            title = topic.get("title", "").strip()
+            kind = topic.get("kind", "").strip()
+            files = _split_path_list("\n".join(topic.get("evidenceFiles", [])))
+            if not title:
+                raise ValueError("catalog topic is missing a title")
+            if kind not in TOPIC_KINDS:
+                raise ValueError(f"catalog topic {title!r} has invalid or missing kind")
+            if not files:
+                raise ValueError(f"catalog topic {title!r} is missing evidence files")
+            topic["title"] = title
+            topic["evidenceFiles"] = files
             pages.append(topic)
         topic = None
 
@@ -752,13 +933,14 @@ def parse_catalog(text: str) -> list[dict]:
         elif line.startswith("<topic"):
             finish_topic()
             attrs = _parse_tag_attrs(line)
-            files = attrs.get("files") or attrs.get("associatedFiles") or attrs.get("associated_files") or ""
+            files = attrs.get("files") or attrs.get("evidenceFiles") or attrs.get("evidence_files") or ""
             topic = {
                 "section": section,
                 "group": group,
+                "kind": attrs.get("kind", ""),
                 "title": "",
                 "level": attrs.get("level", "Intermediate"),
-                "associatedFiles": _split_associated_files(files),
+                "evidenceFiles": _split_path_list(files),
             }
             expect = "topic"
         elif line.startswith("</topic"):
@@ -768,7 +950,7 @@ def parse_catalog(text: str) -> list[dict]:
             expect = "files"
             inline = re.sub(r"</?files[^>]*>", "", line).strip()
             if inline and topic:
-                topic.setdefault("associatedFiles", []).extend(_split_associated_files(inline))
+                topic.setdefault("evidenceFiles", []).extend(_split_path_list(inline))
         elif line.startswith("</files"):
             expect = None
         elif line.startswith("<"):
@@ -781,7 +963,7 @@ def parse_catalog(text: str) -> list[dict]:
             elif expect == "topic" and topic:
                 topic["title"] = line
             elif expect == "files" and topic:
-                topic.setdefault("associatedFiles", []).append(line)
+                topic.setdefault("evidenceFiles", []).append(line)
             if expect != "files":
                 expect = None
     finish_topic()
@@ -794,6 +976,51 @@ def slugify(index: int, title: str) -> str:
     # punctuation, filename-hostile chars like / \ : * ? " < > |) into one hyphen.
     body = re.sub(r"[^\w]+", "-", title, flags=re.UNICODE).strip("-")
     return f"{index}-{body}" if body else f"{index}"
+
+
+def _shorten_title(title: str, limit: int = 80) -> str:
+    title = " ".join(title.split())
+    if len(title) <= limit:
+        return title
+    return title[: limit - 3].rstrip() + "..."
+
+
+def clean_catalog_pages(repo: Path, pages: list[dict], topic_budget: int) -> list[dict]:
+    cleaned: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for page in pages:
+        title = _shorten_title(str(page.get("title", "")).strip())
+        kind = str(page.get("kind", "")).strip()
+        if not title or kind not in TOPIC_KINDS:
+            continue
+        evidence = normalize_evidence_files(repo, list(page.get("evidenceFiles") or []))
+        if not evidence:
+            continue
+        key = (kind, title.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({
+            "section": str(page.get("section", "")).strip() or "Guide",
+            "group": str(page.get("group", "")).strip(),
+            "kind": kind,
+            "title": title,
+            "level": str(page.get("level", "Intermediate")).strip() or "Intermediate",
+            "evidenceFiles": evidence[:4],
+        })
+        if len(cleaned) >= topic_budget:
+            break
+    return cleaned
+
+
+def catalog_defect(pages: list[dict]) -> str:
+    if not pages:
+        return "no valid v2 topics with kind, title, and evidence files"
+    kinds = {p.get("kind") for p in pages}
+    missing = sorted(REQUIRED_TOPIC_KINDS - kinds)
+    if missing:
+        return "missing required topic kind(s): " + ", ".join(missing)
+    return ""
 
 
 def render_nav(pages: list[dict], current: int) -> str:
@@ -820,37 +1047,28 @@ def render_nav(pages: list[dict], current: int) -> str:
 # Phase 2 — per-page documentation                                            #
 # --------------------------------------------------------------------------- #
 
-PAGE_SYSTEM = """You are an INTJ technical documentation architect with code archaeology expertise — methodical, insightful, and precision-oriented.
+PAGE_SYSTEM = """You are an expert software architect and technical writer. Write for humans who need a durable mental model of the project, not a line-by-line explanation of the code.
 
 ## Environment
 - Working directory: {workdir}
 - Operating system: {os}
 
-## Identity & Methodology
-- Core Approach: systematic pattern recognition, architectural clarity, logical precision.
-- Documentation Framework: Diátaxis methodology + AIDA narrative (Attention -> Interest -> Desire -> Action).
-- Analysis Pattern: start from first principles, identify core patterns, then examine implementation detail.
-
-## Technical Standards
-- **Content Structure**: Paragraph-driven with breaks only at cognitive boundaries
-- **Visual Elements**:
-  - Mermaid diagrams for architectural concepts (with prerequisite explanation)
-  - Tables for multi-dimensional comparisons
-  - Strategic bold for conceptual anchoring
-- **Evidence Standard**:
-  - Sources: [filename](relative/path/to/file#L<start>-L<end>) at paragraph boundaries
-  - Zero speculation — document only verifiable patterns
-- **Cross-references**: Use `[Page Title](page_slug)` syntax for linking to other pages in the wiki
-
-## Tool Usage Protocol
-Hypothesis-driven investigation: formulate specific architectural questions -> select precise tools -> verify minimal scope -> synthesize."""
+## Writing Standard
+- Architecture first: explain intent, core abstractions, boundaries, flows, constraints, and safe change paths.
+- Evidence based: document only patterns you can verify from local files.
+- Source citations: end paragraphs with `Sources: [filename](relative/path#L<start>-L<end>)`.
+- Cross-references: use `[Page Title](page_slug)` syntax.
+- Avoid code encyclopedias: do not summarize every function, translate source files, or mirror directory structure.
+- Use diagrams and tables only when they clarify the page's architectural purpose."""
 
 PAGE_USER = """## CURRENT MISSION
 **Working directory**: {workdir}
 **Operating system**: {os}
 **Current Page**: "{title}" documentation
+**Page kind**: {kind}
 **Audience**: {level} level developers
 **Documentation language**: {lang}
+**Documentation depth**: {doc_depth}
 
 ## ENVIRONMENT
 Repository structure (top 2 levels):
@@ -867,32 +1085,23 @@ Repository structure (top 2 levels):
 - Write ONLY about "{title}" — avoid content that belongs to other catalog pages.
 - Reference other pages by their exact catalog links when suggesting next steps.
 
-**Associated source paths**:
+**Evidence source paths**:
 ```
-{associated_files}
+{evidence_files}
 ```
-Use these associated paths as your primary starting points. You may inspect other files when needed to verify context, but keep the final page focused on this source scope.
+Use these paths as primary evidence. You may inspect other files when needed to verify context, but keep the final page focused on this topic.
 
 ## DOCUMENT TYPE REQUIREMENTS
-**Global requirement**:
-- Reference local files at the end of every paragraph as: `Sources: [filename](relative/path#L<start>-L<end>)`
-- Use {lang} as the language for all written content
-
-**For Overview/Getting Started docs**:
-- Suggest logical reading progression based on catalog structure using exact catalog links: `[Page Name](page_slug)`
-- Create architecture overview with Mermaid diagram
-- Use tables for feature comparisons, configuration options, or API summaries
-- Add visual project structure representation
-
-**For How-to/Tutorial docs**:
-- Include step-by-step Mermaid flowcharts
-- Use tables for parameter explanations, troubleshooting guides
-- Add before/after code comparison tables
-
-**For Explanation docs**:
-- Create concept relationship diagrams with Mermaid
-- Use tables for pattern comparisons, pros/cons analysis
-- Include class/module interaction diagrams
+- Use {lang} for all written content.
+- For `overview`: explain purpose, audience, reading path, and the main architectural idea.
+- For `quickstart`: focus on how to run or try the project only when supported by evidence.
+- For `architecture`: explain components, responsibilities, boundaries, and relationships.
+- For `concepts`: explain domain terms and core abstractions.
+- For `runtime-flow`: trace the main control/data flow from entry point to output.
+- For `extension-points`: explain where and how to add capabilities safely.
+- For `tradeoffs`: explain verified design choices, constraints, and consequences.
+- For `change-guide`: explain practical maintenance paths and risk areas.
+- For `reference`: provide compact orientation material that supports the other pages.
 
 ## OUTPUT FORMAT
 Wrap your FINAL complete documentation in <blog></blog> tags:
@@ -906,7 +1115,7 @@ Sources: [filename](relative/path#L123-L456)
 </blog>
 
 ## EXECUTE NOW
-Begin with architectural hypothesis formation. Verify through targeted code examination using the available tools. Deliver "{title}" documentation with visual elements and precise local file references. Remember to wrap your FINAL output in <blog></blog> tags."""
+Form an architectural hypothesis, verify it with targeted code examination, then write the page. Remember to wrap your FINAL output in <blog></blog> tags."""
 
 
 def extract_blog(text: str) -> str:
@@ -968,19 +1177,34 @@ def assign_page_fields(pages: list[dict], repo: Path | None = None) -> list[dict
         p["index"] = i
         p.setdefault("slug", slugify(i, p["title"]))
         p.setdefault("file", f"{p['slug']}.md")
-        p["associatedFiles"] = list(p.get("associatedFiles") or [])
+        p["kind"] = p.get("kind", "reference")
+        p["evidenceFiles"] = list(p.get("evidenceFiles") or [])
         if repo:
-            p["associatedFiles"] = normalize_source_paths(repo, p["associatedFiles"])
+            p["evidenceFiles"] = normalize_evidence_files(repo, p["evidenceFiles"])
     return pages
 
 
+def _catalog_pages_from_raw(repo: Path, raw: str, topic_budget: int) -> tuple[list[dict], str]:
+    try:
+        pages = clean_catalog_pages(repo, parse_catalog(raw), topic_budget)
+    except ValueError as e:
+        return [], str(e)
+    defect = catalog_defect(pages)
+    if defect:
+        return pages, defect
+    return assign_page_fields(pages, repo), ""
+
+
 def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
-                  settings: LLMSettings, tree: str) -> list[dict]:
+                  settings: LLMSettings, tree: str, profile: ProjectProfile) -> list[dict]:
+    topic_budget = topic_budget_for_depth(config.doc_depth, config.max_topics)
     ctx = {
         "workdir": str(repo),
         "os": sys.platform,
         "lang": lang_name(config.doc_lang),
-        "max_topics": config.max_topics,
+        "doc_depth": config.doc_depth,
+        "topic_budget": topic_budget,
+        "project_profile": profile_summary(profile),
         "tool_usage": tool_usage_description(config.enable_shell),
     }
     messages = [
@@ -988,10 +1212,20 @@ def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
         {"role": "user", "content": CATALOG_USER.format(tree=tree, **ctx)},
     ]
     catalog_raw = run_agent(client, repo, messages, "catalog", settings, config)
-    pages = parse_catalog(catalog_raw)
-    if not pages:
-        raise SystemExit("no topics parsed from catalog:\n" + catalog_raw)
-    return assign_page_fields(pages, repo)
+    pages, defect = _catalog_pages_from_raw(repo, catalog_raw, topic_budget)
+    if defect:
+        messages.append({"role": "user", "content":
+            "Your catalog was rejected: "
+            + defect
+            + ". Output a complete corrected v2 catalog now. Do not call tools. "
+              "Every topic must include kind, level, title, and 1-4 existing evidence files."})
+        catalog_raw = client.chat.completions.create(model=settings.model, messages=messages
+                                                     ).choices[0].message.content or ""
+        messages.append({"role": "assistant", "content": catalog_raw})
+        pages, defect = _catalog_pages_from_raw(repo, catalog_raw, topic_budget)
+    if defect:
+        raise SystemExit("invalid v2 catalog: " + defect + "\n" + catalog_raw)
+    return pages
 
 
 def lang_code(doc_lang: str) -> str:
@@ -1006,19 +1240,24 @@ def lang_name(doc_lang: str) -> str:
 
 
 def write_wiki_index(version_dir: Path, pages: list[dict], version_id: str,
-                     started: datetime, doc_lang: str, manifest: dict,
+                     started: datetime, doc_lang: str, doc_depth: str,
+                     profile: ProjectProfile, manifest: dict,
                      source_root: Path | None = None) -> None:
     meta = {
+        "schema_version": 2,
         "id": version_id,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "language": lang_code(doc_lang),
+        "doc_depth": doc_depth,
+        "project_profile": asdict(profile),
         "source_root": str(source_root) if source_root else "",
         "pages": [
             {k: v for k, v in (
                 ("slug", p["slug"]), ("title", p["title"]), ("file", p["file"]),
                 ("section", p["section"]), ("group", p.get("group", "")),
+                ("kind", p.get("kind", "")),
                 ("level", p.get("level", "")),
-                ("associatedFiles", p.get("associatedFiles", [])),
+                ("evidenceFiles", p.get("evidenceFiles", [])),
             ) if v}
             for p in pages
         ],
@@ -1035,12 +1274,12 @@ def write_wiki_index(version_dir: Path, pages: list[dict], version_id: str,
         if p.get("group") and p["group"] != last_group:
             summary.append(f"\n**{p['group']}**\n")
             last_group = p["group"]
-        summary.append(f"- [{p['title']}]({p['file']}) `{p.get('level', '')}`")
+        summary.append(f"- [{p['title']}]({p['file']}) `{p.get('kind', '')}` `{p.get('level', '')}`")
     (version_dir / "SUMMARY.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     write_manifest(version_dir, manifest)
 
 
-def load_current_wiki(out_dir: Path) -> tuple[Path, list[dict], dict | None] | None:
+def load_current_wiki(out_dir: Path, strict: bool = True) -> tuple[Path, list[dict], dict | None, dict] | None:
     cur = out_dir / "current"
     if not cur.exists():
         return None
@@ -1049,8 +1288,15 @@ def load_current_wiki(out_dir: Path) -> tuple[Path, list[dict], dict | None] | N
     if not meta_path.exists():
         return None
     meta = json.loads(meta_path.read_text())
+    if meta.get("schema_version") != 2:
+        if strict:
+            raise SystemExit(
+                f"unsupported wiki schema under {version_dir}: expected schema_version 2. "
+                "Start a fresh v2 wiki with --force."
+            )
+        return None
     pages = assign_page_fields([dict(p) for p in meta["pages"]])
-    return version_dir, pages, load_manifest(version_dir)
+    return version_dir, pages, load_manifest(version_dir), meta
 
 
 def page_matches(page: dict, selector: str | None) -> bool:
@@ -1092,16 +1338,17 @@ def page_messages(repo: Path, config: RuntimeConfig, tree: str,
         "workdir": str(repo),
         "os": sys.platform,
         "lang": lang_name(config.doc_lang),
-        "max_topics": config.max_topics,
+        "doc_depth": config.doc_depth,
         "tool_usage": tool_usage_description(config.enable_shell),
     }
     nav = render_nav(pages, page["index"] - 1)
-    associated = "\n".join(f"- {p}" for p in page.get("associatedFiles", [])) or "- (catalog did not bind source paths)"
+    evidence = "\n".join(f"- {p}" for p in page.get("evidenceFiles", [])) or "- (catalog did not bind evidence paths)"
     return [
         {"role": "system", "content": PAGE_SYSTEM.format(**ctx)},
         {"role": "user", "content": PAGE_USER.format(
-            title=page["title"], level=page.get("level", "Intermediate"),
-            tree=tree, nav=nav, associated_files=associated, **ctx)},
+            title=page["title"], kind=page.get("kind", "reference"),
+            level=page.get("level", "Intermediate"),
+            tree=tree, nav=nav, evidence_files=evidence, **ctx)},
     ]
 
 
@@ -1180,12 +1427,13 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     current_manifest = build_file_manifest(repo)
+    current_profile = build_project_profile(repo)
     tree = get_dir_structure(repo, ".", 2)
     resume = args.resume
     existing = load_current_wiki(out_dir) if (resume or args.page) else None
     # Auto-resume an interrupted run instead of silently starting a duplicate version.
     if existing is None and not resume and not args.page and not args.force:
-        candidate = load_current_wiki(out_dir)
+        candidate = load_current_wiki(out_dir, strict=False)
         if candidate and version_is_incomplete(candidate[0], candidate[1]):
             print(f"[!] incomplete previous run at {candidate[0]}; resuming "
                   f"(use --force to start a fresh version)", flush=True)
@@ -1196,7 +1444,8 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
     settings: LLMSettings | None = None
     prev_current: str | None = None
     if existing:
-        version_dir, pages, previous_manifest = existing
+        version_dir, pages, previous_manifest, meta = existing
+        config = replace(config, doc_depth=str(meta["doc_depth"]))
         manifest_diff = diff_manifests(previous_manifest, current_manifest)
         print(f"[1/2] reusing catalog from {version_dir}", flush=True)
         print(f"      {len(pages)} topics", flush=True)
@@ -1208,13 +1457,15 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
             raise SystemExit(f"no resumable version found under {out_dir}; run without --resume to start a new wiki")
         cur_ptr = out_dir / "current"
         prev_current = cur_ptr.read_text().strip() if cur_ptr.exists() else None
+        config = replace(config, doc_depth=resolve_doc_depth(current_profile, config.doc_depth))
         settings = resolve_provider(config)
         client = make_client(settings)
         print(
             f"[1/2] building catalog for {repo} via {settings.provider}:{settings.model} @ {settings.base_url}",
             flush=True,
         )
-        pages = build_catalog(client, repo, config, settings, tree)
+        print(f"      doc depth: {config.doc_depth}", flush=True)
+        pages = build_catalog(client, repo, config, settings, tree, current_profile)
         print(f"      {len(pages)} topics", flush=True)
 
         started = datetime.now(timezone.utc)
@@ -1222,7 +1473,7 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         version_dir = out_dir / "versions" / version_id
         version_dir.mkdir(parents=True, exist_ok=True)
         write_wiki_index(version_dir, pages, version_id, started, config.doc_lang,
-                         current_manifest, source_root=repo)
+                         config.doc_depth, current_profile, current_manifest, source_root=repo)
         (out_dir / "current").write_text(f"versions/{version_id}\n", encoding="utf-8")
 
     todo, skipped = plan_pages(version_dir, pages, args.page, args.force, manifest_diff)
@@ -1237,8 +1488,8 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
     else:
         completed = failed = 0
     if existing and not args.page and failed == 0:
-        if changed_count and not any(p.get("associatedFiles") for p in pages):
-            print("      manifest not updated: current catalog has no associatedFiles", flush=True)
+        if changed_count and not any(p.get("evidenceFiles") for p in pages):
+            print("      manifest not updated: current catalog has no evidenceFiles", flush=True)
         else:
             write_manifest(version_dir, current_manifest)
     elif existing and args.page:

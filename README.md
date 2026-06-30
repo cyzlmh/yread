@@ -1,8 +1,8 @@
 # yread
 
-> Turn a local source repository into a structured Markdown wiki.
+> Turn a local source repository into an architecture-first Markdown wiki.
 
-`yread` is a lightweight, installable Python CLI — turn a local repository into a structured Markdown wiki, powered by LLMs. Inspired by [zread](https://zread.ai).
+`yread` is a lightweight, installable Python CLI — turn a local repository into an architecture-first Markdown wiki, powered by LLMs. Inspired by [zread](https://zread.ai).
 
 ## Why
 
@@ -11,9 +11,9 @@ Zread popularized the idea of generating a developer guide from a GitHub reposit
 - Local repositories only
 - Direct OpenAI-compatible provider calls
 - A small, readable Python implementation
-- Markdown output that can be checked into notes, opened in Obsidian, or served locally
+- Markdown output focused on human architectural understanding
 
-This is not a hosted wiki platform. It is a local code-reading tool.
+This is not a hosted wiki platform. It is a local project-understanding tool.
 
 ## How It Works
 
@@ -22,13 +22,13 @@ This is not a hosted wiki platform. It is a local code-reading tool.
 ```text
 Phase 1: Catalog Agent
   Inspect the repository
-  Plan sections, groups, and topics
-  Attach relevant source paths to each topic
+  Build a lightweight project profile
+  Plan architecture-first topics with evidence paths
 
 Phase 2: Page Agents
   Start one fresh conversation per topic
-  Inspect the relevant source files
-  Write Markdown wrapped as a wiki page
+  Inspect evidence files
+  Write human-oriented architecture and maintenance guidance
 ```
 
 Agents only receive three read-only tools:
@@ -84,7 +84,7 @@ $EDITOR .env.yread
 uv run yread generate /path/to/repo --env-file .env.yread
 ```
 
-All tunables (provider, model, language, concurrency, output) live in config rather than on the `generate` command, keeping the command surface lean.
+All tunables (provider, model, language, depth, concurrency, output) live in config rather than on the `generate` command, keeping the command surface lean.
 
 Persistent config lives at:
 
@@ -107,6 +107,7 @@ yread config set BASE_URL https://api.example.com/v1
 yread config set API_KEY sk-...
 yread config set MODEL your-model
 yread config set DOC_LANG en
+yread config set DOC_DEPTH standard
 yread config show
 ```
 
@@ -123,6 +124,7 @@ process environment > --env-file > ~/.yread/config.env > defaults
 | `API_KEY` | auto-resolved | Provider API key |
 | `MODEL` | provider default | Model name |
 | `DOC_LANG` | `en` | Documentation language code, e.g. `zh`, `en` |
+| `DOC_DEPTH` | `auto` | `auto`, `brief`, `standard`, or `deep`; controls topic budget and page breadth |
 | `MAX_STEPS` | `24` | Max tool-call rounds per agent |
 | `MAX_TOPICS` | `30` | Catalog topic cap |
 | `CONCURRENCY` | `1` | Parallel page agents |
@@ -153,6 +155,9 @@ source-affected pages:
 ```bash
 yread generate /path/to/repo --resume
 ```
+
+Resume and browse require the current v2 wiki schema. Older generated wiki
+metadata is intentionally not supported.
 
 Regenerate one page by slug, title, or Markdown filename:
 
@@ -193,7 +198,7 @@ cp -R skills/yread "${CODEX_HOME:-$HOME/.codex}/skills/"
 
 ## Example Output
 
-See [examples/sample-wiki](examples/sample-wiki) for a static sample of the output layout. It demonstrates `wiki.json`, `manifest.json`, and Markdown page files; it is not a real model-generated run.
+See [examples/sample-wiki](examples/sample-wiki) for a static sample of the v2 output layout. It demonstrates `wiki.json`, `manifest.json`, and Markdown page files; it is not a real model-generated run.
 
 ## Development
 
@@ -212,7 +217,8 @@ The file-reading tools block common secret files such as `.env`, private keys, a
 
 - No hosted service: output is local Markdown.
 - No AST parser: repository understanding is LLM-driven.
-- No symbolic incremental engine: resume uses a file-level manifest plus per-page associated paths.
+- Architecture-first pages: source paths are evidence, not the page structure.
+- No symbolic incremental engine: resume uses a file-level manifest plus per-page evidence paths.
 - Standard package layout: `src/yread/core.py` for generation, `src/yread/cli.py` for CLI/config, and `src/yread/viewer.py` for the local browser.
 
 ## Related Projects

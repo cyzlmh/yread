@@ -8,7 +8,7 @@ from yread import cli
 
 CONFIG_ENV_KEYS = {
     "PROVIDER", "BASE_URL", "API_KEY", "MODEL", "DOC_LANG",
-    "MAX_STEPS", "MAX_TOPICS", "CONCURRENCY", "ENABLE_SHELL", "OUTPUT_DIR",
+    "DOC_DEPTH", "MAX_STEPS", "MAX_TOPICS", "CONCURRENCY", "ENABLE_SHELL", "OUTPUT_DIR",
 }
 
 
@@ -27,6 +27,7 @@ def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pyte
             "API_KEY=test-key",
             "MODEL=test-model",
             "DOC_LANG=English",
+            "DOC_DEPTH=deep",
             "CONCURRENCY=3",
             "ENABLE_SHELL=0",
         ])
@@ -37,6 +38,7 @@ def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pyte
     settings = yread.resolve_provider(config)
 
     assert config.doc_lang == "English"
+    assert config.doc_depth == "deep"
     assert config.concurrency == 3
     assert config.enable_shell is False
     assert settings.base_url == "https://llm.example/v1"
@@ -51,7 +53,17 @@ def test_default_doc_language_is_en(monkeypatch: pytest.MonkeyPatch) -> None:
     config = yread.config_from_args(args)
 
     assert config.doc_lang == "en"
+    assert config.doc_depth == "auto"
     assert yread.lang_name(config.doc_lang) == "English"
+
+
+def test_invalid_doc_depth_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_config_env(monkeypatch)
+    monkeypatch.setenv("DOC_DEPTH", "full")
+    args = yread.build_arg_parser().parse_args(["."])
+
+    with pytest.raises(SystemExit, match="DOC_DEPTH must be one of"):
+        yread.config_from_args(args)
 
 
 def test_config_file_drives_output_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,7 +124,7 @@ def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                          capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path / ".yread")
     monkeypatch.setattr(cli, "CONFIG_FILE", tmp_path / ".yread" / "config.env")
-    answers = iter(["deepseek", "https://api.deepseek.com/v1", "sk-test", "deepseek-v4-pro", "zh", ""])
+    answers = iter(["deepseek", "https://api.deepseek.com/v1", "sk-test", "deepseek-v4-pro", "zh", "standard", ""])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert cli.main(["config", "init"]) == 0
@@ -121,6 +133,7 @@ def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     out = capsys.readouterr().out
     assert "PROVIDER=deepseek" in out
     assert "DOC_LANG=zh" in out
+    assert "DOC_DEPTH=standard" in out
     assert "OUTPUT_DIR" not in out  # left blank -> not written
 
 
@@ -145,11 +158,28 @@ def test_wiki_index_records_source_root(tmp_path: Path) -> None:
 
     version_dir = tmp_path / "v1"
     version_dir.mkdir()
-    pages = [{"slug": "a", "file": "a.md", "title": "A", "section": "S"}]
+    pages = [{"slug": "a", "file": "a.md", "title": "A", "section": "S",
+              "kind": "overview", "level": "Beginner", "evidenceFiles": ["README.md"]}]
+    profile = yread.ProjectProfile(
+        total_files=1,
+        source_files=0,
+        primary_languages=[],
+        max_depth=1,
+        has_readme=True,
+        has_tests=False,
+        has_ci=False,
+        package_files=[],
+        entry_points=[],
+    )
     yread.write_wiki_index(version_dir, pages, "v1", datetime.now(timezone.utc),
-                           "en", {}, source_root=tmp_path / "repo")
+                           "en", "brief", profile, {}, source_root=tmp_path / "repo")
     meta = json.loads((version_dir / "wiki.json").read_text())
+    assert meta["schema_version"] == 2
+    assert meta["doc_depth"] == "brief"
+    assert meta["project_profile"]["has_readme"] is True
     assert meta["source_root"] == str(tmp_path / "repo")
+    assert meta["pages"][0]["kind"] == "overview"
+    assert meta["pages"][0]["evidenceFiles"] == ["README.md"]
 
 
 def test_cli_requires_explicit_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
@@ -184,12 +214,12 @@ def test_parse_catalog_and_slugify() -> None:
     raw = """
 <section>
 Get Started
-<topic level="Beginner" files="README.md, src/yread/core.py">
+<topic kind="overview" level="Beginner" files="README.md, src/yread/core.py">
 项目概览
 </topic>
 <group>
 Internals
-<topic level="Advanced" files="src/yread/core.py">
+<topic kind="architecture" level="Advanced" files="src/yread/core.py">
 Agent 循环
 </topic>
 </group>
@@ -200,8 +230,43 @@ Agent 循环
     assert [p["title"] for p in pages] == ["项目概览", "Agent 循环"]
     assert pages[0]["slug"] == "1-项目概览"
     assert pages[1]["slug"] == "2-Agent-循环"
-    assert pages[0]["associatedFiles"] == ["README.md", "src/yread/core.py"]
+    assert pages[0]["kind"] == "overview"
+    assert pages[0]["evidenceFiles"] == ["README.md", "src/yread/core.py"]
     assert pages[1]["group"] == "Internals"
+
+
+def test_parse_catalog_requires_kind() -> None:
+    raw = """
+<section>
+Get Started
+<topic level="Beginner" files="README.md">
+Overview
+</topic>
+</section>
+"""
+
+    with pytest.raises(ValueError, match="invalid or missing kind"):
+        yread.parse_catalog(raw)
+
+
+def test_clean_catalog_pages_filters_invalid_evidence(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n")
+    raw = """
+<section>
+Start
+<topic kind="overview" level="Beginner" files="README.md, /tmp/secret.txt, missing.py">
+Overview
+</topic>
+<topic kind="overview" level="Beginner" files="README.md">
+Overview
+</topic>
+</section>
+"""
+
+    pages = yread.clean_catalog_pages(tmp_path, yread.parse_catalog(raw), topic_budget=10)
+
+    assert len(pages) == 1
+    assert pages[0]["evidenceFiles"] == ["README.md"]
 
 
 def test_plan_pages_skips_existing_but_page_selector_forces_regeneration(tmp_path: Path) -> None:
@@ -220,21 +285,21 @@ def test_plan_pages_skips_existing_but_page_selector_forces_regeneration(tmp_pat
     assert skipped == []
 
 
-def test_plan_pages_regenerates_pages_with_changed_associated_files(tmp_path: Path) -> None:
+def test_plan_pages_regenerates_pages_with_changed_evidence_files(tmp_path: Path) -> None:
     pages = yread.assign_page_fields([
         {
             "section": "Get Started",
             "group": "",
             "title": "Overview",
             "level": "Beginner",
-            "associatedFiles": ["README.md"],
+            "evidenceFiles": ["README.md"],
         },
         {
             "section": "Deep Dive",
             "group": "",
             "title": "Runtime",
             "level": "Advanced",
-            "associatedFiles": ["src/"],
+            "evidenceFiles": ["src/"],
         },
     ])
     for page in pages:
@@ -265,6 +330,30 @@ def test_file_manifest_detects_added_modified_and_removed_files(tmp_path: Path) 
     assert ".env" not in {f["path"] for f in after["files"]}
 
 
+def test_project_profile_detects_repo_shape(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n")
+    (tmp_path / "pyproject.toml").write_text('[project.scripts]\ndemo = "demo.cli:main"\n')
+    (tmp_path / "src" / "demo").mkdir(parents=True)
+    (tmp_path / "src" / "demo" / "cli.py").write_text("def main(): pass\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_cli.py").write_text("def test_ok(): pass\n")
+
+    profile = yread.build_project_profile(tmp_path)
+
+    assert profile.has_readme is True
+    assert profile.has_tests is True
+    assert profile.primary_languages == ["Python"]
+    assert "pyproject.toml" in profile.package_files
+    assert "src/demo/cli.py" in profile.entry_points
+    assert yread.resolve_doc_depth(profile, "auto") == "brief"
+
+
+def test_topic_budget_for_depth_respects_max_topics() -> None:
+    assert yread.topic_budget_for_depth("brief", 30) == 5
+    assert yread.topic_budget_for_depth("standard", 30) == 15
+    assert yread.topic_budget_for_depth("deep", 12) == 12
+
+
 def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page = yread.assign_page_fields([
         {"section": "Get Started", "group": "", "title": "Overview", "level": "Beginner"}
@@ -283,6 +372,7 @@ def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monke
         api_key=settings.api_key,
         model=settings.model,
         doc_lang="English",
+        doc_depth="brief",
         max_steps=1,
         max_topics=2,
         concurrency=1,
