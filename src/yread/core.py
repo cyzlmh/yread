@@ -234,6 +234,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Generate one page by slug, title, or markdown filename")
     p.add_argument("--force", action="store_true",
                    help="Regenerate pages even when output files already exist")
+    p.add_argument("--output-dir", type=Path, default=None,
+                   help="Wiki output directory (overrides OUTPUT_DIR config)")
+    p.add_argument("--doc-depth", choices=sorted(DOC_DEPTHS), default=None,
+                   help="Documentation depth: auto, brief, standard, or deep")
     return p
 
 
@@ -252,20 +256,25 @@ def config_from_args(args: argparse.Namespace, config_files: list[Path] | None =
     concurrency = _env_int(file_env, "CONCURRENCY", 1)
     if concurrency < 1:
         raise SystemExit("CONCURRENCY must be >= 1")
+    doc_depth = _env_choice(file_env, "DOC_DEPTH", "auto", DOC_DEPTHS)
+    if getattr(args, "doc_depth", None):
+        doc_depth = args.doc_depth
+    raw_output_dir = _env_get(file_env, "OUTPUT_DIR")
+    output_dir: Path | None = Path(raw_output_dir).expanduser() if raw_output_dir else None
+    if getattr(args, "output_dir", None):
+        output_dir = args.output_dir.expanduser()
     return RuntimeConfig(
         provider=provider,
         base_url=_env_get(file_env, "BASE_URL"),
         api_key=_env_get(file_env, "API_KEY"),
         model=_env_get(file_env, "MODEL"),
         doc_lang=_env_get(file_env, "DOC_LANG", "en") or "en",
-        doc_depth=_env_choice(file_env, "DOC_DEPTH", "auto", DOC_DEPTHS),
+        doc_depth=doc_depth,
         max_steps=_env_int(file_env, "MAX_STEPS", 24),
         max_topics=_env_int(file_env, "MAX_TOPICS", 30),
         concurrency=concurrency,
         enable_shell=_env_bool(file_env, "ENABLE_SHELL", True),
-        output_dir=(
-            Path(output_dir).expanduser() if (output_dir := _env_get(file_env, "OUTPUT_DIR")) else None
-        ),
+        output_dir=output_dir,
         env_file=args.env_file,
     )
 
