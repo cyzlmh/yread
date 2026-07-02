@@ -26,7 +26,7 @@
     {
       "slug": "1-overview",
       "title": "Overview",
-      "file": "1-overview.md",
+      "file": "wiki/1-overview.md",
       "section": "Get Started",
       "kind": "overview",
       "level": "Beginner",
@@ -38,7 +38,7 @@
     {
       "slug": "2-agent-pipeline",
       "title": "Agent Pipeline",
-      "file": "2-agent-pipeline.md",
+      "file": "wiki/2-agent-pipeline.md",
       "section": "Architecture",
       "group": "Core Model",
       "kind": "architecture",

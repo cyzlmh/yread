@@ -62,7 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
         generate._add_action(action)
 
     browse = sub.add_parser("browse", help="Open a generated wiki in the browser")
-    browse.add_argument("wiki_dir", nargs="?", help="Wiki root or version directory")
+    browse.add_argument("wiki_dir", nargs="?", help="Yread output root")
     browse.add_argument("--host", default="localhost", help="Host to bind")
     browse.add_argument("--port", type=int, default=8000)
     browse.add_argument("--repo", default=None, help="Source repository for source links")
@@ -93,7 +93,7 @@ INIT_PROMPTS = [
     ("MODEL", "Model name", ""),
     ("DOC_LANG", "Documentation language code [zh/en]", "en"),
     ("DOC_DEPTH", "Documentation depth [auto/brief/standard/deep]", "auto"),
-    ("OUTPUT_DIR", "Output directory (blank = <repo>/.yread/wiki)", ""),
+    ("OUTPUT_DIR", "Output directory (blank = <repo>/.yread)", ""),
 ]
 
 

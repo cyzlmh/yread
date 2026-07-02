@@ -2,8 +2,8 @@
 
     yread browse [wiki_dir] [--host localhost] [--port 8000] [--repo <repo_path>]
 
-wiki_dir defaults to ./.yread/wiki. If it holds a `current` pointer the latest
-version is served; a version dir (with a v2 wiki.json) also works directly.
+wiki_dir defaults to ./.yread. It serves a v2 wiki root with wiki.json and
+Markdown pages under wiki/. Old versioned wiki roots are still accepted.
 
 Renders each page's markdown with mermaid diagrams, a section/kind sidebar from
 wiki.json, and resolves the inter-page `[title](slug)` cross-links. The source
@@ -24,18 +24,30 @@ import markdown
 SENSITIVE_SOURCE_NAMES = {".env", ".env.local", ".npmrc", ".pypirc", ".netrc", "auth.json", "credentials.json"}
 
 
-def resolve_wiki(arg: str | None) -> Path:
-    root = Path(arg).resolve() if arg else Path(".yread/wiki").resolve()
-    if (root / "wiki.json").exists():
-        return root
+def _resolve_versioned_wiki(root: Path) -> Path | None:
     cur = root / "current"
     if cur.exists():
         return (root / cur.read_text().strip()).resolve()
-    # maybe given the wiki/ root with versions/ but no current
     versions = sorted((root / "versions").glob("*")) if (root / "versions").exists() else []
     if versions:
         return versions[-1]
-    raise SystemExit(f"no wiki.json (or current pointer) under {root}")
+    return None
+
+
+def resolve_wiki(arg: str | None) -> Path:
+    root = Path(arg).resolve() if arg else Path(".yread").resolve()
+    if (root / "wiki.json").exists():
+        return root
+    legacy = _resolve_versioned_wiki(root)
+    if legacy:
+        return legacy
+    legacy_root = root / "wiki"
+    if (legacy_root / "wiki.json").exists():
+        return legacy_root
+    legacy = _resolve_versioned_wiki(legacy_root)
+    if legacy:
+        return legacy
+    raise SystemExit(f"no wiki.json under {root}")
 
 
 PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">

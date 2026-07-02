@@ -17,6 +17,12 @@ def clear_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def write_page(root: Path, page: dict, text: str) -> None:
+    target = root / page["file"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+
+
 def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     clear_config_env(monkeypatch)
     env_file = tmp_path / ".env.yread"
@@ -137,28 +143,27 @@ def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "OUTPUT_DIR" not in out  # left blank -> not written
 
 
-def test_version_is_incomplete(tmp_path: Path) -> None:
+def test_wiki_is_incomplete(tmp_path: Path) -> None:
     pages = [
-        {"slug": "a", "file": "a.md", "title": "A"},
-        {"slug": "b", "file": "b.md", "title": "B"},
+        {"slug": "a", "file": "wiki/a.md", "title": "A"},
+        {"slug": "b", "file": "wiki/b.md", "title": "B"},
     ]
-    (tmp_path / "a.md").write_text("# A\n\nbody\n")
-    assert yread.version_is_incomplete(tmp_path, pages) is True  # b.md missing
+    write_page(tmp_path, pages[0], "# A\n\nbody\n")
+    assert yread.wiki_is_incomplete(tmp_path, pages) is True  # b.md missing
 
-    (tmp_path / "b.md").write_text("# B\n\n> This page failed to generate: x\n")
-    assert yread.version_is_incomplete(tmp_path, pages) is True  # b.md is a failure stub
+    write_page(tmp_path, pages[1], "# B\n\n> This page failed to generate: x\n")
+    assert yread.wiki_is_incomplete(tmp_path, pages) is True  # b.md is a failure stub
 
-    (tmp_path / "b.md").write_text("# B\n\nbody\n")
-    assert yread.version_is_incomplete(tmp_path, pages) is False
+    write_page(tmp_path, pages[1], "# B\n\nbody\n")
+    assert yread.wiki_is_incomplete(tmp_path, pages) is False
 
 
 def test_wiki_index_records_source_root(tmp_path: Path) -> None:
     import json
     from datetime import datetime, timezone
 
-    version_dir = tmp_path / "v1"
-    version_dir.mkdir()
-    pages = [{"slug": "a", "file": "a.md", "title": "A", "section": "S",
+    output_root = tmp_path / ".yread"
+    pages = [{"slug": "a", "file": "wiki/a.md", "title": "A", "section": "S",
               "kind": "overview", "level": "Beginner", "evidenceFiles": ["README.md"]}]
     profile = yread.ProjectProfile(
         total_files=1,
@@ -171,15 +176,17 @@ def test_wiki_index_records_source_root(tmp_path: Path) -> None:
         package_files=[],
         entry_points=[],
     )
-    yread.write_wiki_index(version_dir, pages, "v1", datetime.now(timezone.utc),
+    yread.write_wiki_index(output_root, pages, "run1", datetime.now(timezone.utc),
                            "en", "brief", profile, {}, source_root=tmp_path / "repo")
-    meta = json.loads((version_dir / "wiki.json").read_text())
+    meta = json.loads((output_root / "wiki.json").read_text())
     assert meta["schema_version"] == 2
     assert meta["doc_depth"] == "brief"
     assert meta["project_profile"]["has_readme"] is True
     assert meta["source_root"] == str(tmp_path / "repo")
+    assert meta["pages"][0]["file"] == "wiki/a.md"
     assert meta["pages"][0]["kind"] == "overview"
     assert meta["pages"][0]["evidenceFiles"] == ["README.md"]
+    assert (output_root / "SUMMARY.md").read_text().count("(wiki/a.md)") == 1
 
 
 def test_cli_requires_explicit_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
@@ -274,7 +281,7 @@ def test_plan_pages_skips_existing_but_page_selector_forces_regeneration(tmp_pat
         {"section": "Get Started", "group": "", "title": "Overview", "level": "Beginner"},
         {"section": "Deep Dive", "group": "", "title": "Runtime", "level": "Advanced"},
     ])
-    (tmp_path / pages[0]["file"]).write_text("# Overview\n")
+    write_page(tmp_path, pages[0], "# Overview\n")
 
     todo, skipped = yread.plan_pages(tmp_path, pages, selector=None, force=False)
     assert [p["slug"] for p in todo] == [pages[1]["slug"]]
@@ -303,7 +310,7 @@ def test_plan_pages_regenerates_pages_with_changed_evidence_files(tmp_path: Path
         },
     ])
     for page in pages:
-        (tmp_path / page["file"]).write_text(f"# {page['title']}\n")
+        write_page(tmp_path, page, f"# {page['title']}\n")
 
     diff = {"added": [], "modified": ["src/main.py"], "removed": []}
     todo, skipped = yread.plan_pages(tmp_path, pages, selector=None, force=False, manifest_diff=diff)
@@ -354,11 +361,83 @@ def test_topic_budget_for_depth_respects_max_topics() -> None:
     assert yread.topic_budget_for_depth("deep", 12) == 12
 
 
+def test_generate_writes_flat_output_root_and_overwrites_previous_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Demo\n")
+    settings = yread.LLMSettings("test", "https://llm.example/v1", "key", "model")
+    config = yread.RuntimeConfig(
+        provider="openai-compatible",
+        base_url=settings.base_url,
+        api_key=settings.api_key,
+        model=settings.model,
+        doc_lang="en",
+        doc_depth="brief",
+        max_steps=1,
+        max_topics=3,
+        concurrency=1,
+        enable_shell=False,
+    )
+    run = {"count": 0}
+
+    def fake_build_catalog(*_args):
+        run["count"] += 1
+        raw_pages = [
+            {
+                "section": "Guide",
+                "group": "",
+                "title": "Overview",
+                "kind": "overview",
+                "level": "Beginner",
+                "evidenceFiles": ["README.md"],
+            },
+        ]
+        if run["count"] == 1:
+            raw_pages.append({
+                "section": "Guide",
+                "group": "",
+                "title": "Runtime",
+                "kind": "runtime-flow",
+                "level": "Intermediate",
+                "evidenceFiles": ["README.md"],
+            })
+        return yread.assign_page_fields(raw_pages, repo)
+
+    monkeypatch.setattr(yread, "resolve_provider", lambda _config: settings)
+    monkeypatch.setattr(yread, "make_client", lambda _settings: object())
+    monkeypatch.setattr(yread, "build_catalog", fake_build_catalog)
+    monkeypatch.setattr(
+        yread,
+        "generate_page",
+        lambda _client, _repo, _messages, slug, _settings, _config: f"# {slug}\n\nrun {run['count']}",
+    )
+
+    args = yread.build_arg_parser().parse_args([str(repo)])
+    output_root = yread.run_generate(args, config)
+
+    assert output_root == repo / ".yread"
+    assert (output_root / "wiki.json").is_file()
+    assert (output_root / "manifest.json").is_file()
+    assert (output_root / "SUMMARY.md").is_file()
+    assert (output_root / "wiki" / "1-Overview.md").read_text() == "# 1-Overview\n\nrun 1\n"
+    assert (output_root / "wiki" / "2-Runtime.md").is_file()
+    assert not (output_root / "current").exists()
+    assert not (output_root / "versions").exists()
+
+    yread.run_generate(args, config)
+
+    assert (output_root / "wiki" / "1-Overview.md").read_text() == "# 1-Overview\n\nrun 2\n"
+    assert not (output_root / "wiki" / "2-Runtime.md").exists()
+
+
 def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page = yread.assign_page_fields([
         {"section": "Get Started", "group": "", "title": "Overview", "level": "Beginner"}
     ])[0]
     target = tmp_path / page["file"]
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("# Previous good page\n")
 
     def fail_generate_page(*_args, **_kwargs):

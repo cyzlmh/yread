@@ -22,7 +22,7 @@ Config via env:
     MAX_TOPICS  catalog topic cap            (default 30)
     CONCURRENCY parallel page agents          (default 1)
     ENABLE_SHELL expose run_bash to agents    (default 1)
-    OUTPUT_DIR  default wiki output directory (else <repo>/.yread/wiki)
+    OUTPUT_DIR  default yread output directory (else <repo>/.yread)
 
 Providers:
     minimax-cn  MiniMax-M3 called directly at api.minimaxi.com, credentials from ~/.pi
@@ -101,6 +101,8 @@ ENTRYPOINT_PATTERNS = (
     "src/main.ts", "src/main.tsx", "src/index.ts", "src/index.tsx",
     "src/main.js", "src/index.js", "cmd", "main.go",
 )
+
+WIKI_PAGE_DIR = "wiki"
 
 
 @dataclass(frozen=True)
@@ -229,13 +231,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Repository to analyze (default: current directory)")
     p.add_argument("--env-file", type=Path, default=None,
                    help="Optional dotenv-style config file, e.g. .env.yread")
-    p.add_argument("--resume", action="store_true", help="Resume latest incomplete wiki version")
+    p.add_argument("--resume", action="store_true", help="Resume the current wiki output")
     p.add_argument("--page", default=None,
                    help="Generate one page by slug, title, or markdown filename")
     p.add_argument("--force", action="store_true",
                    help="Regenerate pages even when output files already exist")
     p.add_argument("--output-dir", type=Path, default=None,
-                   help="Wiki output directory (overrides OUTPUT_DIR config)")
+                   help="Yread output directory (overrides OUTPUT_DIR config)")
     p.add_argument("--doc-depth", choices=sorted(DOC_DEPTHS), default=None,
                    help="Documentation depth: auto, brief, standard, or deep")
     return p
@@ -528,8 +530,8 @@ def profile_summary(profile: ProjectProfile) -> str:
     return json.dumps(asdict(profile), ensure_ascii=False, indent=2)
 
 
-def load_manifest(version_dir: Path) -> dict | None:
-    path = version_dir / "manifest.json"
+def load_manifest(output_root: Path) -> dict | None:
+    path = output_root / "manifest.json"
     if not path.exists():
         return None
     try:
@@ -538,8 +540,8 @@ def load_manifest(version_dir: Path) -> dict | None:
         return None
 
 
-def write_manifest(version_dir: Path, manifest: dict) -> None:
-    (version_dir / "manifest.json").write_text(
+def write_manifest(output_root: Path, manifest: dict) -> None:
+    (output_root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -1068,7 +1070,9 @@ PAGE_SYSTEM = """You are an expert software architect and technical writer. Writ
 - Source citations: end paragraphs with `Sources: [filename](relative/path#L<start>-L<end>)`.
 - Cross-references: use `[Page Title](page_slug)` syntax.
 - Avoid code encyclopedias: do not summarize every function, translate source files, or mirror directory structure.
-- Use diagrams and tables only when they clarify the page's architectural purpose."""
+- Visual explanations: use Mermaid diagrams for architecture maps, module relationships, and core runtime flows when they are central to the page.
+- Keep diagrams conceptual: show major components, boundaries, responsibilities, dependencies, and high-level data/control flow.
+- Prefer one high-signal diagram for architecture and runtime-flow pages, followed by prose explanation and source citations."""
 
 PAGE_USER = """## CURRENT MISSION
 **Working directory**: {workdir}
@@ -1102,11 +1106,11 @@ Use these paths as primary evidence. You may inspect other files when needed to 
 
 ## DOCUMENT TYPE REQUIREMENTS
 - Use {lang} for all written content.
-- For `overview`: explain purpose, audience, reading path, and the main architectural idea.
+- For `overview`: explain purpose, audience, reading path, and the main architectural idea. In standard or deep depth, include a small system map when the project has multiple major parts.
 - For `quickstart`: focus on how to run or try the project only when supported by evidence.
-- For `architecture`: explain components, responsibilities, boundaries, and relationships.
-- For `concepts`: explain domain terms and core abstractions.
-- For `runtime-flow`: trace the main control/data flow from entry point to output.
+- For `architecture`: explain components, responsibilities, boundaries, and relationships. Include one Mermaid architecture or module map.
+- For `concepts`: explain domain terms and core abstractions. Use a Mermaid relationship diagram when multiple concepts interact across modules.
+- For `runtime-flow`: trace the main control/data flow from entry point to output. Include one Mermaid flowchart or sequence diagram for the core flow.
 - For `extension-points`: explain where and how to add capabilities safely.
 - For `tradeoffs`: explain verified design choices, constraints, and consequences.
 - For `change-guide`: explain practical maintenance paths and risk areas.
@@ -1185,7 +1189,7 @@ def assign_page_fields(pages: list[dict], repo: Path | None = None) -> list[dict
     for i, p in enumerate(pages, 1):
         p["index"] = i
         p.setdefault("slug", slugify(i, p["title"]))
-        p.setdefault("file", f"{p['slug']}.md")
+        p.setdefault("file", f"{WIKI_PAGE_DIR}/{p['slug']}.md")
         p["kind"] = p.get("kind", "reference")
         p["evidenceFiles"] = list(p.get("evidenceFiles") or [])
         if repo:
@@ -1248,13 +1252,15 @@ def lang_name(doc_lang: str) -> str:
     return {"zh": "Chinese", "en": "English"}.get(lang_code(doc_lang), doc_lang)
 
 
-def write_wiki_index(version_dir: Path, pages: list[dict], version_id: str,
+def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
                      started: datetime, doc_lang: str, doc_depth: str,
                      profile: ProjectProfile, manifest: dict,
                      source_root: Path | None = None) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / WIKI_PAGE_DIR).mkdir(parents=True, exist_ok=True)
     meta = {
         "schema_version": 2,
-        "id": version_id,
+        "id": run_id,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "language": lang_code(doc_lang),
         "doc_depth": doc_depth,
@@ -1271,7 +1277,7 @@ def write_wiki_index(version_dir: Path, pages: list[dict], version_id: str,
             for p in pages
         ],
     }
-    (version_dir / "wiki.json").write_text(
+    (output_root / "wiki.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     summary = ["# Wiki\n"]
@@ -1284,28 +1290,24 @@ def write_wiki_index(version_dir: Path, pages: list[dict], version_id: str,
             summary.append(f"\n**{p['group']}**\n")
             last_group = p["group"]
         summary.append(f"- [{p['title']}]({p['file']}) `{p.get('kind', '')}` `{p.get('level', '')}`")
-    (version_dir / "SUMMARY.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
-    write_manifest(version_dir, manifest)
+    (output_root / "SUMMARY.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    write_manifest(output_root, manifest)
 
 
-def load_current_wiki(out_dir: Path, strict: bool = True) -> tuple[Path, list[dict], dict | None, dict] | None:
-    cur = out_dir / "current"
-    if not cur.exists():
-        return None
-    version_dir = (out_dir / cur.read_text().strip()).resolve()
-    meta_path = version_dir / "wiki.json"
+def load_wiki(output_root: Path, strict: bool = True) -> tuple[list[dict], dict | None, dict] | None:
+    meta_path = output_root / "wiki.json"
     if not meta_path.exists():
         return None
     meta = json.loads(meta_path.read_text())
     if meta.get("schema_version") != 2:
         if strict:
             raise SystemExit(
-                f"unsupported wiki schema under {version_dir}: expected schema_version 2. "
-                "Start a fresh v2 wiki with --force."
+                f"unsupported wiki schema under {output_root}: expected schema_version 2. "
+                "Regenerate the wiki to create fresh metadata."
             )
         return None
     pages = assign_page_fields([dict(p) for p in meta["pages"]])
-    return version_dir, pages, load_manifest(version_dir), meta
+    return pages, load_manifest(output_root), meta
 
 
 def page_matches(page: dict, selector: str | None) -> bool:
@@ -1321,11 +1323,11 @@ def page_matches(page: dict, selector: str | None) -> bool:
     return any(str(c).lower() == needle for c in candidates)
 
 
-def page_needs_generation(version_dir: Path, page: dict, force: bool,
+def page_needs_generation(output_root: Path, page: dict, force: bool,
                           manifest_diff: dict[str, list[str]] | None = None) -> bool:
     if force:
         return True
-    path = version_dir / page["file"]
+    path = output_root / page["file"]
     if not path.exists():
         return True
     content = path.read_text(errors="replace").strip()
@@ -1336,9 +1338,9 @@ def page_needs_generation(version_dir: Path, page: dict, force: bool,
     return page_sources_changed(page, manifest_diff or {"added": [], "modified": [], "removed": []})
 
 
-def version_is_incomplete(version_dir: Path, pages: list[dict]) -> bool:
-    """A version is incomplete if any page is missing, empty, or failed."""
-    return any(page_needs_generation(version_dir, p, False) for p in pages)
+def wiki_is_incomplete(output_root: Path, pages: list[dict]) -> bool:
+    """A wiki output is incomplete if any page is missing, empty, or failed."""
+    return any(page_needs_generation(output_root, p, False) for p in pages)
 
 
 def page_messages(repo: Path, config: RuntimeConfig, tree: str,
@@ -1362,11 +1364,12 @@ def page_messages(repo: Path, config: RuntimeConfig, tree: str,
 
 
 def write_one_page(settings: LLMSettings, config: RuntimeConfig, repo: Path,
-                   version_dir: Path, tree: str, pages: list[dict],
+                   output_root: Path, tree: str, pages: list[dict],
                    page: dict) -> tuple[str, bool, str | None]:
     client = make_client(settings)
     messages = page_messages(repo, config, tree, pages, page)
-    target = version_dir / page["file"]
+    target = output_root / page["file"]
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
         blog = generate_page(client, repo, messages, page["slug"], settings, config)
         ok, error = True, None
@@ -1380,7 +1383,7 @@ def write_one_page(settings: LLMSettings, config: RuntimeConfig, repo: Path,
     return page["slug"], ok, error
 
 
-def plan_pages(version_dir: Path, pages: list[dict], selector: str | None,
+def plan_pages(output_root: Path, pages: list[dict], selector: str | None,
                force: bool, manifest_diff: dict[str, list[str]] | None = None) -> tuple[list[dict], list[dict]]:
     matched = [p for p in pages if page_matches(p, selector)]
     if selector and not matched:
@@ -1388,14 +1391,14 @@ def plan_pages(version_dir: Path, pages: list[dict], selector: str | None,
         raise SystemExit(f"no page matched {selector!r}; available slugs include: {choices}")
     todo = [
         p for p in matched
-        if page_needs_generation(version_dir, p, force or bool(selector), manifest_diff)
+        if page_needs_generation(output_root, p, force or bool(selector), manifest_diff)
     ]
     skipped = [p for p in matched if p not in todo]
     return todo, skipped
 
 
 def generate_pages(settings: LLMSettings, config: RuntimeConfig, repo: Path,
-                   version_dir: Path, tree: str, pages: list[dict],
+                   output_root: Path, tree: str, pages: list[dict],
                    todo: list[dict]) -> tuple[int, int]:
     completed = failed = 0
     if not todo:
@@ -1404,7 +1407,7 @@ def generate_pages(settings: LLMSettings, config: RuntimeConfig, repo: Path,
     if workers == 1:
         for p in todo:
             print(f"  - ({p['index']}/{len(pages)}) {p['title']} -> {p['file']}", flush=True)
-            _slug, ok, error = write_one_page(settings, config, repo, version_dir, tree, pages, p)
+            _slug, ok, error = write_one_page(settings, config, repo, output_root, tree, pages, p)
             completed += int(ok)
             failed += int(not ok)
             if error:
@@ -1416,7 +1419,7 @@ def generate_pages(settings: LLMSettings, config: RuntimeConfig, repo: Path,
         futures = {}
         for p in todo:
             print(f"  - ({p['index']}/{len(pages)}) {p['title']} -> {p['file']}", flush=True)
-            fut = pool.submit(write_one_page, settings, config, repo, version_dir, tree, pages, p)
+            fut = pool.submit(write_one_page, settings, config, repo, output_root, tree, pages, p)
             futures[fut] = p
         for fut in as_completed(futures):
             p = futures[fut]
@@ -1428,44 +1431,57 @@ def generate_pages(settings: LLMSettings, config: RuntimeConfig, repo: Path,
     return completed, failed
 
 
+def cleanup_removed_pages(output_root: Path, previous_pages: list[dict], current_pages: list[dict]) -> None:
+    current_files = {Path(p["file"]) for p in current_pages}
+    root = output_root.resolve()
+    for page in previous_pages:
+        raw = str(page.get("file", "")).strip()
+        if not raw:
+            continue
+        rel = Path(raw)
+        if rel.is_absolute() or rel in current_files:
+            continue
+        target = (output_root / rel).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        if target.is_file():
+            target.unlink()
+
+
 def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
     repo = Path(args.repo_path).resolve()
     if not repo.is_dir():
         raise SystemExit(f"not a directory: {repo}")
-    out_dir = config.output_dir.resolve() if config.output_dir else repo / ".yread" / "wiki"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    output_root = config.output_dir.resolve() if config.output_dir else repo / ".yread"
+    output_root.mkdir(parents=True, exist_ok=True)
 
     current_manifest = build_file_manifest(repo)
     current_profile = build_project_profile(repo)
     tree = get_dir_structure(repo, ".", 2)
     resume = args.resume
-    existing = load_current_wiki(out_dir) if (resume or args.page) else None
-    # Auto-resume an interrupted run instead of silently starting a duplicate version.
-    if existing is None and not resume and not args.page and not args.force:
-        candidate = load_current_wiki(out_dir, strict=False)
-        if candidate and version_is_incomplete(candidate[0], candidate[1]):
-            print(f"[!] incomplete previous run at {candidate[0]}; resuming "
-                  f"(use --force to start a fresh version)", flush=True)
-            existing, resume = candidate, True
+    existing = load_wiki(output_root) if (resume or args.page) else None
     manifest_diff = {"added": [], "modified": [], "removed": []}
     changed_count = 0
 
     settings: LLMSettings | None = None
-    prev_current: str | None = None
     if existing:
-        version_dir, pages, previous_manifest, meta = existing
+        pages, previous_manifest, meta = existing
         config = replace(config, doc_depth=str(meta["doc_depth"]))
         manifest_diff = diff_manifests(previous_manifest, current_manifest)
-        print(f"[1/2] reusing catalog from {version_dir}", flush=True)
+        print(f"[1/2] reusing catalog from {output_root}", flush=True)
         print(f"      {len(pages)} topics", flush=True)
         changed_count = sum(len(v) for v in manifest_diff.values())
         if changed_count:
             print(f"      source changes: {changed_count} file(s)", flush=True)
     else:
         if resume:
-            raise SystemExit(f"no resumable version found under {out_dir}; run without --resume to start a new wiki")
-        cur_ptr = out_dir / "current"
-        prev_current = cur_ptr.read_text().strip() if cur_ptr.exists() else None
+            raise SystemExit(f"no wiki output found under {output_root}; run without --resume to create it")
+        if args.page:
+            raise SystemExit(f"no wiki output found under {output_root}; run without --page to create it")
+        previous = load_wiki(output_root, strict=False)
+        previous_pages = previous[0] if previous else []
         config = replace(config, doc_depth=resolve_doc_depth(current_profile, config.doc_depth))
         settings = resolve_provider(config)
         client = make_client(settings)
@@ -1478,14 +1494,13 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         print(f"      {len(pages)} topics", flush=True)
 
         started = datetime.now(timezone.utc)
-        version_id = started.astimezone().strftime("%Y-%m-%d-%H%M%S")
-        version_dir = out_dir / "versions" / version_id
-        version_dir.mkdir(parents=True, exist_ok=True)
-        write_wiki_index(version_dir, pages, version_id, started, config.doc_lang,
+        run_id = started.astimezone().strftime("%Y-%m-%d-%H%M%S")
+        write_wiki_index(output_root, pages, run_id, started, config.doc_lang,
                          config.doc_depth, current_profile, current_manifest, source_root=repo)
-        (out_dir / "current").write_text(f"versions/{version_id}\n", encoding="utf-8")
+        cleanup_removed_pages(output_root, previous_pages, pages)
 
-    todo, skipped = plan_pages(version_dir, pages, args.page, args.force, manifest_diff)
+    force_pages = args.force or not existing
+    todo, skipped = plan_pages(output_root, pages, args.page, force_pages, manifest_diff)
     for p in skipped:
         print(f"  - skip existing {p['title']} -> {p['file']}", flush=True)
 
@@ -1493,30 +1508,20 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
     print(f"[2/2] writing {len(todo)} page(s)", flush=True)
     if todo:
         settings = settings or resolve_provider(config)
-        completed, failed = generate_pages(settings, config, repo, version_dir, tree, pages, todo)
+        completed, failed = generate_pages(settings, config, repo, output_root, tree, pages, todo)
     else:
         completed = failed = 0
     if existing and not args.page and failed == 0:
         if changed_count and not any(p.get("evidenceFiles") for p in pages):
             print("      manifest not updated: current catalog has no evidenceFiles", flush=True)
         else:
-            write_manifest(version_dir, current_manifest)
+            write_manifest(output_root, current_manifest)
     elif existing and args.page:
         print("      manifest not updated after single-page regeneration", flush=True)
-    # Failure protection: a fresh build that produced no pages must not replace a
-    # previously-good wiki. Restore the prior `current` pointer (or unset it).
-    if not existing and completed == 0:
-        cur_ptr = out_dir / "current"
-        if prev_current:
-            cur_ptr.write_text(prev_current + "\n", encoding="utf-8")
-            print(f"      no pages generated; kept previous wiki ({prev_current}) as current", flush=True)
-        else:
-            cur_ptr.unlink(missing_ok=True)
-            print("      no pages generated; left current unset", flush=True)
-    elif failed:
-        print("      re-run `yread generate` to retry failed pages (auto-resumes)", flush=True)
-    print(f"\ndone -> {version_dir} ({completed} completed, {failed} failed, {len(skipped)} skipped)", flush=True)
-    return version_dir
+    if failed:
+        print("      re-run `yread generate --resume` to retry failed pages", flush=True)
+    print(f"\ndone -> {output_root} ({completed} completed, {failed} failed, {len(skipped)} skipped)", flush=True)
+    return output_root
 
 
 def main() -> None:

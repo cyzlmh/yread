@@ -9,12 +9,12 @@ Use this skill when the user wants to turn a local source repository into an arc
 
 ## What yread Does
 
-yread analyzes a local repository with a lightweight project profile, an LLM-driven catalog phase, and per-page writing phase. It writes a v2 versioned Markdown wiki with `wiki.json`, `manifest.json`, `SUMMARY.md`, and one Markdown file per architecture-first topic.
+yread analyzes a local repository with a lightweight project profile, an LLM-driven catalog phase, and per-page writing phase. It writes a v2 Markdown wiki with `wiki.json`, `manifest.json`, and `SUMMARY.md` in the output root, plus one Markdown file per architecture-first topic under `wiki/`.
 
 Default output is:
 
 ```bash
-<repo>/.yread/wiki
+<repo>/.yread
 ```
 
 Persistent user config is:
@@ -45,7 +45,7 @@ yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis/project"
 yread generate /path/to/repo
 ```
 
-Resume the current wiki version:
+Resume the current wiki output:
 
 ```bash
 yread generate /path/to/repo --resume
@@ -98,7 +98,7 @@ Precedence is: process environment, `--env-file`, `~/.yread/config.env`, default
 1. Confirm the target repository path exists.
 2. Check `yread config show` when the user expects saved provider, language, or export settings.
 3. For Obsidian export, set `yread config set OUTPUT_DIR ...` (config-driven, no per-run flag).
-4. Use `--resume` when a previous v2 version exists and the user wants incremental completion.
+4. Use `--resume` when an existing v2 output exists and the user wants incremental completion.
 5. Use `yread browse` only when the user wants browser inspection; generation itself writes Markdown files directly.
 
 ## Privacy Note

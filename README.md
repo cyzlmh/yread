@@ -63,13 +63,12 @@ uv run yread generate /path/to/repo
 Output defaults to:
 
 ```text
-<repo>/.yread/wiki/
-├── current
-└── versions/<YYYY-MM-DD-HHMMSS>/
-    ├── <slug>.md
-    ├── wiki.json
-    ├── manifest.json
-    └── SUMMARY.md
+<repo>/.yread/
+├── wiki/
+│   └── <slug>.md
+├── wiki.json
+├── manifest.json
+└── SUMMARY.md
 ```
 
 ## Provider Configuration
@@ -129,7 +128,7 @@ process environment > --env-file > ~/.yread/config.env > defaults
 | `MAX_TOPICS` | `30` | Catalog topic cap |
 | `CONCURRENCY` | `1` | Parallel page agents |
 | `ENABLE_SHELL` | `1` | Expose `run_bash` to agents |
-| `OUTPUT_DIR` | `<repo>/.yread/wiki` | Default export directory |
+| `OUTPUT_DIR` | `<repo>/.yread` | Default export directory |
 
 For `minimax-cn` and `deepseek`, missing credentials are resolved from `~/.pi/agent/models.json` and `~/.pi/agent/auth.json` when available.
 
@@ -142,22 +141,20 @@ yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis/yread"
 yread generate /path/to/repo
 ```
 
-## Resume and Regenerate
+## Overwrite and Resume
 
-If a previous run was interrupted or left failed pages, a plain `yread generate`
-auto-detects the incomplete version and resumes it instead of starting a new one
-(use `--force` to start fresh). A build that produces no pages never replaces a
-previously-good wiki.
+A plain `yread generate` rebuilds the catalog and overwrites the current output
+under `.yread/`. Markdown pages live in `.yread/wiki/`; `wiki.json`,
+`manifest.json`, and `SUMMARY.md` live directly under `.yread/`.
 
-Explicitly resume the current version, regenerating only missing, failed, or
-source-affected pages:
+If a previous run was interrupted or left failed pages, explicitly resume the
+current output, regenerating only missing, failed, or source-affected pages:
 
 ```bash
 yread generate /path/to/repo --resume
 ```
 
-Resume and browse require the current v2 wiki schema. Older generated wiki
-metadata is intentionally not supported.
+Resume and browse require the current v2 wiki schema.
 
 Regenerate one page by slug, title, or Markdown filename:
 
@@ -177,13 +174,13 @@ The source repository is recorded in `wiki.json` at generation time, so source
 citations resolve automatically — from inside the repo, just run:
 
 ```bash
-yread browse                       # serves ./.yread/wiki
+yread browse                       # serves ./.yread
 ```
 
 Or point at a wiki explicitly; `--repo` overrides the recorded source root:
 
 ```bash
-uv run yread browse /path/to/repo/.yread/wiki --host localhost --port 8000
+uv run yread browse /path/to/repo/.yread --host localhost --port 8000
 ```
 
 ## Codex Skill
