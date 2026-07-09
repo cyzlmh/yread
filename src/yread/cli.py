@@ -162,82 +162,73 @@ def _run_profile(args: argparse.Namespace) -> int:
     repo = Path(args.repo_path).resolve()
     profile = core.build_project_profile(repo)
     config = _read_config()
-    requested = (core._env_get(config, "DOC_DEPTH", "auto") or "auto").strip().lower()
-    resolved = core.resolve_doc_depth(profile, requested)
     languages = core.language_stats(repo)
     code = core.code_stats(repo)
-    signals = [name for name, on in (("readme", profile.has_readme),
-                                     ("tests", profile.has_tests),
-                                     ("ci", profile.has_ci)) if on]
-    print(f"Project: {repo}")
-    print(f"total_files:       {profile.total_files}")
-    print(f"source_files:      {profile.source_files}")
-    print(f"total_loc:         {code['total_loc']}   (code {code['code_loc']}, blank {code['blank_loc']})")
-    print(f"primary_languages: {', '.join(profile.primary_languages) or '-'}")
-    print(f"max_depth:         {profile.max_depth}")
-    print(f"package_files:     {', '.join(profile.package_files) or '-'}")
-    print(f"entry_points:      {', '.join(profile.entry_points) or '-'}")
-    print(f"signals:           {', '.join(signals) or '-'}")
-    if requested == resolved:
-        print(f"doc_depth:         {resolved}")
-    else:
-        print(f"doc_depth:         {requested} -> {resolved}")
-    print()
-    print("code:")
-    print(f"  avg_file:          {code['avg_file_loc']} loc")
+
+    def row(label: str, value: str) -> None:
+        print(f"{label:<11}{value}")
+
+    row("Project", str(repo))
+    row("Files", f"{code['core_files']} source · {profile.total_files} total · depth {profile.max_depth}")
+
+    code_line = f"{code['core_loc']:,} loc"
+    if code["core_files"]:
+        code_line += f" · avg {code['avg_file_loc']}/file"
     if code["test_files"]:
-        print(f"  tests:             {code['test_files']} files, {code['test_loc']} loc"
-              f"  ({code['test_ratio']:.2f}x source)")
-    else:
-        print("  tests:             none")
-    if code["largest"]:
-        print("  largest:")
-        for f in code["largest"][:3]:
-            print(f"    {f['path']:<30} {f['loc']:>6} loc")
+        code_line += f" · tests {code['test_loc']:,} loc ({code['test_ratio']:.2f}x)"
+    row("Code", code_line)
+
+    structure = list(profile.package_files)
+    if profile.entry_points:
+        structure.append("entry " + ", ".join(profile.entry_points))
+    if structure:
+        row("Structure", " · ".join(structure))
+
     if languages:
         print()
-        print("languages:")
+        print("Languages")
         for s in languages:
-            print(f"  {s['language']:<14} {s['files']:>3} files  {s['loc']:>6} loc")
+            plural = "file" if s["files"] == 1 else "files"
+            print(f"  {s['language']:<14}{s['loc']:>9,}  {s['files']:>3} {plural}")
+
     stats = core.git_stats(repo)
-    if stats:
-        print()
-        print("git:")
-        print(f"  commits:           {stats['commits']}")
-        if stats["first_commit"] and stats["last_commit"]:
-            print(f"  history:           {stats['first_commit']} -> {stats['last_commit']}")
-        print(f"  recent_30d:        {stats['recent_commits_30d']} commits")
-        print(f"  contributors:      {stats['contributors']}")
-        print(f"  current_version:   {stats['current_version'] or '-'}")
-        print(f"  dirty:             {str(stats['dirty']).lower()}")
     gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))
-    if gh:
-        stars = gh.get("stars")
-        star_str = str(stars) if stars is not None else "n/a"
-        if gh.get("error"):
-            star_str += f" ({gh['error']})"
+    if stats or gh:
         print()
-        print(f"github: {gh['full_name']}  stars: {star_str}")
-        if gh.get("description"):
-            print(f"  description:       {gh['description']}")
-        forks, watchers, issues = gh.get("forks"), gh.get("watchers"), gh.get("open_issues")
-        if any(v is not None for v in (forks, watchers, issues)):
-            print(f"  forks: {forks if forks is not None else '-'}   "
-                  f"watchers: {watchers if watchers is not None else '-'}   "
-                  f"open_issues: {issues if issues is not None else '-'}")
-        if gh.get("topics"):
-            print(f"  topics:            {', '.join(gh['topics'])}")
+    if stats:
+        parts = [f"{stats['commits']} commits"]
+        if stats["contributors"]:
+            parts.append(f"{stats['contributors']} contributors")
+        if stats["first_commit"] and stats["last_commit"]:
+            parts.append(f"{stats['first_commit']}→{stats['last_commit']}")
+        parts.append(f"{stats['recent_commits_30d']} in 30d")
+        if stats["current_version"]:
+            parts.append(stats["current_version"])
+        if stats["dirty"]:
+            parts.append("dirty")
+        row("Git", " · ".join(parts))
+
+    if gh:
+        parts = [gh["full_name"]]
+        stars = gh.get("stars")
+        if stars is not None:
+            parts.append(f"{stars}★")
+        elif gh.get("error"):
+            parts.append(gh["error"])
+        if gh.get("forks"):
+            parts.append(f"{gh['forks']} forks")
+        if gh.get("open_issues"):
+            parts.append(f"{gh['open_issues']} issues")
         if gh.get("license"):
-            print(f"  license:           {gh['license']}")
-        if gh.get("homepage"):
-            print(f"  homepage:          {gh['homepage']}")
-        if gh.get("default_branch"):
-            print(f"  default_branch:    {gh['default_branch']}")
+            parts.append(gh["license"])
+        for flag, on in (("archived", gh.get("archived")), ("fork", gh.get("is_fork"))):
+            if on:
+                parts.append(flag)
         if gh.get("pushed_at"):
-            print(f"  last_push:         {gh['pushed_at'][:10]}")
-        flags = [f for f, on in (("archived", gh.get("archived")), ("fork", gh.get("is_fork"))) if on]
-        if flags:
-            print(f"  flags:             {', '.join(flags)}")
+            parts.append(f"pushed {gh['pushed_at'][:10]}")
+        row("GitHub", " · ".join(parts))
+        if gh.get("description"):
+            row("", gh["description"])
     return 0
 
 

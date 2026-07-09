@@ -56,6 +56,16 @@ IGNORE = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__",
           ".mypy_cache", ".pytest_cache", "dist", "build", ".idea", ".yread", ".zread",
           ".env", ".env.local", ".env.yread"}
 
+# Bundled dependency / build-output directories that carry third-party or
+# generated code, not the team's own source. Excluding them keeps the profile a
+# measure of the code that actually has to be understood and maintained.
+# Matched case-insensitively against any path segment.
+VENDOR_DIRS = {
+    "pods", "carthage", ".gradle", "target", "bower_components", "godeps",
+    ".next", ".nuxt", ".svelte-kit", "3rdparty", "thirdparty", "third_party",
+    "thirdlib", "third-party", "3rd_party",
+}
+
 SENSITIVE_NAMES = {
     ".env", ".env.local", ".env.production", ".env.development", ".npmrc", ".pypirc",
     ".netrc", "id_rsa", "id_ed25519", "auth.json", "credentials.json",
@@ -73,8 +83,15 @@ SOURCE_EXTENSIONS = {
     ".py": "Python",
     ".js": "JavaScript",
     ".jsx": "JavaScript",
+    ".mjs": "JavaScript",
+    ".cjs": "JavaScript",
     ".ts": "TypeScript",
     ".tsx": "TypeScript",
+    ".vue": "Vue",
+    ".svelte": "Svelte",
+    ".dart": "Dart",
+    ".m": "Objective-C",
+    ".mm": "Objective-C++",
     ".go": "Go",
     ".rs": "Rust",
     ".java": "Java",
@@ -342,7 +359,9 @@ def is_sensitive_path(path: str | Path) -> bool:
 
 
 def _is_ignored_entry(entry: Path, ignore: set[str]) -> bool:
-    return entry.name in ignore or is_sensitive_path(entry.name)
+    if entry.name in ignore or is_sensitive_path(entry.name):
+        return True
+    return entry.is_dir() and entry.name.lower() in VENDOR_DIRS
 
 
 def _relative_source_path(repo: Path, path: str | Path) -> str | None:
@@ -537,23 +556,89 @@ def profile_summary(profile: ProjectProfile) -> str:
     return json.dumps(asdict(profile), ensure_ascii=False, indent=2)
 
 
+_C_LINE = ("//",)
+_C_EXTS = {
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rs", ".java", ".kt",
+    ".cs", ".cpp", ".cxx", ".cc", ".c", ".h", ".hpp", ".swift", ".scala",
+    ".dart", ".m", ".mm",
+}
+
+
+def _comment_style(ext: str) -> tuple[tuple[str, ...], list[tuple[str, str]]]:
+    """Return (line-comment prefixes, block-comment (open, close) pairs) for a
+    source extension. Empty tuples mean the language is treated as all code."""
+    if ext in _C_EXTS:
+        return _C_LINE, [("/*", "*/")]
+    if ext in {".vue", ".svelte"}:
+        return _C_LINE, [("/*", "*/"), ("<!--", "-->")]
+    if ext == ".php":
+        return ("//", "#"), [("/*", "*/")]
+    if ext == ".py":
+        return ("#",), [('"""', '"""'), ("'''", "'''")]
+    if ext in {".rb", ".sh"}:
+        return ("#",), []
+    return (), []
+
+
+def _line_stats(text: str, ext: str) -> tuple[int, int, int, int]:
+    """Classify a file's lines into (total, blank, comment, code).
+
+    A line is blank if it is whitespace-only, and a comment if it consists
+    solely of comment syntax. Code lines with a trailing comment still count as
+    code. This is a line-based heuristic (like cloc/tokei), not a full parser:
+    block comments opening after code on the same line are not tracked, so the
+    count is a close approximation rather than exact."""
+    lines = text.splitlines()
+    total = len(lines)
+    line_prefixes, blocks = _comment_style(ext)
+    blank = comment = 0
+    close: str | None = None  # active block-comment closing token
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            blank += 1
+            continue
+        if close is not None:
+            comment += 1
+            if close in s:
+                close = None
+            continue
+        for open_t, close_t in blocks:
+            if s.startswith(open_t):
+                comment += 1
+                if close_t not in s[len(open_t):]:
+                    close = close_t
+                break
+        else:
+            if any(s.startswith(p) for p in line_prefixes):
+                comment += 1
+    code = total - blank - comment
+    return total, blank, comment, code
+
+
 def language_stats(repo: Path) -> list[dict]:
-    """Per-language file counts and source lines for source files, sorted by
-    lines descending then language. Lines are total source lines (wc -l style,
-    including blank and comment lines)."""
+    """Per-language file counts and core code lines (test files excluded), sorted
+    by code lines descending then language. ``loc`` counts real code lines only —
+    blank and comment-only lines are excluded — so it reflects core code
+    substance rather than raw file length. The totals sum to ``code_stats``'
+    ``core_loc``."""
     repo = repo.resolve()
     stats: dict[str, dict[str, int]] = {}
     for path in iter_source_files(repo):
-        lang = SOURCE_EXTENSIONS.get(path.suffix.lower())
+        ext = path.suffix.lower()
+        lang = SOURCE_EXTENSIONS.get(ext)
         if not lang:
             continue
+        rel = path.relative_to(repo).as_posix()
+        if _is_test_path(rel):
+            continue
         try:
-            loc = len(path.read_text(errors="replace").splitlines())
+            _total, _blank, _comment, code = _line_stats(path.read_text(errors="replace"), ext)
         except OSError:
             continue
         entry = stats.setdefault(lang, {"files": 0, "loc": 0})
         entry["files"] += 1
-        entry["loc"] += loc
+        entry["loc"] += code
     return [
         {"language": lang, "files": s["files"], "loc": s["loc"]}
         for lang, s in sorted(stats.items(), key=lambda kv: (-kv[1]["loc"], kv[0]))
@@ -561,40 +646,33 @@ def language_stats(repo: Path) -> list[dict]:
 
 
 def code_stats(repo: Path) -> dict:
-    """Substance metrics over source files from a single walk: total/code/blank
-    lines, average and largest non-test files, and a test-vs-source split. Gives
-    a feel for how much real code a project carries and how heavily it is tested.
-    ``code`` counts non-blank source lines; comments are not separated out."""
+    """Core-code metrics over source files from a single walk. Every count is
+    code lines — blank and comment-only lines excluded — split into non-test
+    ("core") code and test code, so the numbers reflect the logic a project
+    carries and how heavily it is tested."""
     repo = repo.resolve()
-    rows: list[tuple[str, int, int, bool]] = []  # (rel, loc, code_loc, is_test)
+    core_files = core_loc = test_files = test_loc = 0
     for path in iter_source_files(repo):
-        if SOURCE_EXTENSIONS.get(path.suffix.lower()) is None:
+        ext = path.suffix.lower()
+        if SOURCE_EXTENSIONS.get(ext) is None:
             continue
         try:
-            lines = path.read_text(errors="replace").splitlines()
+            _total, _blank, _comment, code = _line_stats(path.read_text(errors="replace"), ext)
         except OSError:
             continue
-        rel = path.relative_to(repo).as_posix()
-        code = sum(1 for line in lines if line.strip())
-        rows.append((rel, len(lines), code, _is_test_path(rel)))
-    source = [r for r in rows if not r[3]]
-    tests = [r for r in rows if r[3]]
-    total_loc = sum(r[1] for r in rows)
-    code_loc = sum(r[2] for r in rows)
-    source_loc = sum(r[1] for r in source)
-    test_loc = sum(r[1] for r in tests)
-    ranked = sorted(source or rows, key=lambda r: (-r[1], r[0]))
-    denom = len(source) or len(rows)
+        if _is_test_path(path.relative_to(repo).as_posix()):
+            test_files += 1
+            test_loc += code
+        else:
+            core_files += 1
+            core_loc += code
     return {
-        "source_files": len(rows),
-        "total_loc": total_loc,
-        "code_loc": code_loc,
-        "blank_loc": total_loc - code_loc,
-        "avg_file_loc": round((source_loc or total_loc) / denom) if denom else 0,
-        "largest": [{"path": r[0], "loc": r[1]} for r in ranked[:5]],
-        "test_files": len(tests),
+        "core_files": core_files,
+        "core_loc": core_loc,
+        "avg_file_loc": round(core_loc / core_files) if core_files else 0,
+        "test_files": test_files,
         "test_loc": test_loc,
-        "test_ratio": round(test_loc / source_loc, 2) if source_loc else 0.0,
+        "test_ratio": round(test_loc / core_loc, 2) if core_loc else 0.0,
     }
 
 

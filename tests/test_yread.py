@@ -383,18 +383,17 @@ def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
 
     assert cli.main(["profile", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert f"Project: {tmp_path}" in out
-    assert "primary_languages: Python" in out
-    assert "package_files:     pyproject.toml" in out
-    assert "entry_points:      src/demo/cli.py" in out
-    assert "doc_depth:         auto -> brief" in out
-    assert "total_loc:         1   (code 1, blank 0)" in out
-    assert "signals:           readme" in out  # booleans folded into one compact line
-    assert "has_readme:" not in out            # replaced by quantitative metrics
-    assert "code:" in out
-    assert "avg_file:" in out
-    assert "languages:" in out
-    assert "github:" not in out  # tmp_path is not a git repo -> no network
+    assert f"Project    {tmp_path}" in out
+    assert "Languages" in out
+    assert "Python" in out and "1 file" in out  # per-language table row
+    assert "pyproject.toml" in out
+    assert "entry src/demo/cli.py" in out
+    assert "Code       1 loc" in out
+    assert "avg" in out
+    assert "primary_languages" not in out  # redundant with the Languages line
+    assert "signals" not in out            # low-signal fields dropped
+    assert "doc_depth" not in out
+    assert "GitHub" not in out  # tmp_path is not a git repo -> no network
 
 
 def test_language_stats_counts_files_and_lines(tmp_path: Path) -> None:
@@ -409,8 +408,8 @@ def test_language_stats_counts_files_and_lines(tmp_path: Path) -> None:
     assert langs["Python"]["files"] == 2
     assert langs["Python"]["loc"] == 3
     assert langs["TypeScript"]["files"] == 1
-    assert langs["TypeScript"]["loc"] == 3
-    # loc tie -> language ascending (Python before TypeScript)
+    assert langs["TypeScript"]["loc"] == 2  # blank line excluded
+    # sorted by code loc descending (Python 3 before TypeScript 2)
     assert [s["language"] for s in stats] == ["Python", "TypeScript"]
 
 
@@ -422,15 +421,48 @@ def test_code_stats_splits_code_blank_and_tests(tmp_path: Path) -> None:
 
     stats = yread.code_stats(tmp_path)
 
-    assert stats["source_files"] == 3
-    assert stats["total_loc"] == 7          # 4 + 1 + 2
-    assert stats["code_loc"] == 5           # 2 + 1 + 2
-    assert stats["blank_loc"] == 2
+    assert stats["core_files"] == 2         # test file excluded
+    assert stats["core_loc"] == 3           # 2 + 1 code lines
     assert stats["test_files"] == 1
-    assert stats["test_loc"] == 2
-    assert stats["test_ratio"] == round(2 / 5, 2)  # test loc over non-test source loc
-    assert stats["largest"][0] == {"path": "core.py", "loc": 4}  # largest excludes tests
-    assert stats["avg_file_loc"] == round(5 / 2)   # non-test source only
+    assert stats["test_loc"] == 2           # code lines in the test file
+    assert stats["test_ratio"] == round(2 / 3, 2)  # test code over core code
+    assert stats["avg_file_loc"] == round(3 / 2)   # core code lines / core files
+
+
+def test_code_stats_excludes_comments_across_languages(tmp_path: Path) -> None:
+    (tmp_path / "a.java").write_text(
+        "/*\n"
+        " * license header\n"
+        " */\n"
+        "package x;\n"
+        "// a note\n"
+        "int y = 1; // trailing comment still code\n"
+    )  # 6 lines: 4 comment, 2 code
+    (tmp_path / "b.py").write_text(
+        '"""module\ndocstring"""\n'
+        "import os  # inline\n"
+    )  # 3 lines: 2 comment, 1 code
+
+    stats = yread.code_stats(tmp_path)
+
+    assert stats["core_loc"] == 3      # comments excluded: java 2 + py 1
+
+    # line-level classification the aggregate relies on
+    assert yread._line_stats("/*\n x\n */\ny=1; // t\n", ".java") == (4, 0, 3, 1)
+    assert yread._line_stats('"""d\noc"""\nimport os  # c\n', ".py") == (3, 0, 2, 1)
+
+
+def test_iter_source_files_skips_vendored_dirs(tmp_path: Path) -> None:
+    (tmp_path / "app.swift").write_text("let x = 1\n")
+    (tmp_path / "Pods" / "Lib").mkdir(parents=True)
+    (tmp_path / "Pods" / "Lib" / "dep.swift").write_text("let y = 2\n")
+    (tmp_path / "src" / "3rdparty").mkdir(parents=True)
+    (tmp_path / "src" / "3rdparty" / "vendored.c").write_text("int z;\n")
+
+    rels = {p.relative_to(tmp_path).as_posix() for p in yread.iter_source_files(tmp_path)}
+
+    assert rels == {"app.swift"}
+
 
 
 def test_parse_github_remote_handles_ssh_https_and_non_github() -> None:
@@ -547,10 +579,9 @@ def test_cli_profile_shows_git_section(tmp_path: Path, monkeypatch: pytest.Monke
 
     assert cli.main(["profile", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert "git:" in out
-    assert "commits:           1" in out
-    assert "contributors:      1" in out
-    assert "github:" not in out  # no origin remote -> no network
+    assert "Git        1 commits" in out
+    assert "1 contributors" in out
+    assert "GitHub" not in out  # no origin remote -> no network
 
 
 def test_topic_budget_for_depth_respects_max_topics() -> None:

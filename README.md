@@ -73,20 +73,33 @@ Output defaults to:
 
 ## Project Profile
 
-Inspect a repository's profile without calling an LLM - handy for seeing what
-`DOC_DEPTH=auto` will resolve to:
+Inspect a repository's profile without calling an LLM — a dense, at-a-glance read
+on a project's size, languages, and activity:
 
 ```bash
 yread profile               # or: yread profile /path/to/repo
 ```
 
-It prints file/source counts, total source lines split into code vs blank, a
-per-language breakdown (files and LOC), primary languages, max nesting depth,
-package files, detected entry points, and the resolved doc depth (respecting the
-same `DOC_DEPTH` config precedence as `generate`). A `code:` section conveys how
-much real code the project carries and how heavily it is tested — average file
-size, the largest files, and test volume as a ratio of source (`0.42x source`).
-README/tests/CI presence is folded into a compact `signals:` line.
+```text
+Project    /path/to/repo
+Files      237 source · 320 total · depth 6
+Code       14,695 loc · avg 62/file · tests 53 loc (0.00x)
+
+Languages
+  Swift             7,673   73 files
+  Objective-C       4,888   70 files
+  C/C++               831   80 files
+  Go                  692    5 files
+
+Git        18 commits · 3 contributors · 2025-09-25→2026-07-06 · 5 in 30d · v0.3.0
+GitHub     owner/repo · 12★ · MIT · pushed 2026-07-06
+```
+
+Every line count is **core code** — blank and comment-only lines are excluded, and
+bundled dependencies (`Pods`, `Carthage`, `vendor`, `3rdparty`, build output, …)
+are skipped, so the numbers track the team's own logic. The `Languages` table lists
+each language's core code lines and sums to the `Code` total. Tests are counted
+separately and shown as a ratio of core code.
 
 For any git repository it adds a `git:` section — commit count, history span
 (first/last commit dates), commits in the last 30 days, contributor count,
