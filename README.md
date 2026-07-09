@@ -71,6 +71,35 @@ Output defaults to:
 └── SUMMARY.md
 ```
 
+## Project Profile
+
+Inspect a repository's profile without calling an LLM - handy for seeing what
+`DOC_DEPTH=auto` will resolve to:
+
+```bash
+yread profile               # or: yread profile /path/to/repo
+```
+
+It prints file/source counts, total source lines split into code vs blank, a
+per-language breakdown (files and LOC), primary languages, max nesting depth,
+package files, detected entry points, and the resolved doc depth (respecting the
+same `DOC_DEPTH` config precedence as `generate`). A `code:` section conveys how
+much real code the project carries and how heavily it is tested — average file
+size, the largest files, and test volume as a ratio of source (`0.42x source`).
+README/tests/CI presence is folded into a compact `signals:` line.
+
+For any git repository it adds a `git:` section — commit count, history span
+(first/last commit dates), commits in the last 30 days, contributor count,
+latest tag, and whether the working tree is dirty — all from local git, no
+network.
+
+When the repo's `origin` remote points to GitHub, it adds a `github:` section
+from a single API call: description, stars, forks, watchers, open issues,
+topics, license, homepage, default branch, last push, and `archived`/`fork`
+flags. Set `GITHUB_TOKEN` for higher rate limits and private repos. On failure
+the star line shows `n/a` with the reason (`offline` or `HTTP <code>`, e.g. a
+rate-limited or private repo).
+
 ## Provider Configuration
 
 `yread` can use `minimax-cn`, `deepseek`, or any OpenAI Chat Completions compatible endpoint.
@@ -129,6 +158,7 @@ process environment > --env-file > ~/.yread/config.env > defaults
 | `CONCURRENCY` | `1` | Parallel page agents |
 | `ENABLE_SHELL` | `1` | Expose `run_bash` to agents |
 | `OUTPUT_DIR` | `<repo>/.yread` | Default export directory |
+| `GITHUB_TOKEN` | unset | GitHub token for `profile` — raises API rate limits, unlocks private repos |
 
 For `minimax-cn` and `deepseek`, missing credentials are resolved from `~/.pi/agent/models.json` and `~/.pi/agent/auth.json` when available.
 

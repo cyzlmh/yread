@@ -1,9 +1,24 @@
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from yread import core as yread
 from yread import cli
+
+
+def _init_git_repo(path: Path) -> None:
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+    git("init", "-q")
+    git("config", "user.email", "dev@example.com")
+    git("config", "user.name", "Dev Example")
+
+
+def _git_commit_all(path: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", message], check=True, capture_output=True)
 
 
 CONFIG_ENV_KEYS = {
@@ -353,6 +368,189 @@ def test_project_profile_detects_repo_shape(tmp_path: Path) -> None:
     assert "pyproject.toml" in profile.package_files
     assert "src/demo/cli.py" in profile.entry_points
     assert yread.resolve_doc_depth(profile, "auto") == "brief"
+
+
+def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch,
+                                                        capsys: pytest.CaptureFixture[str]) -> None:
+    clear_config_env(monkeypatch)
+    monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path / ".yread")
+    monkeypatch.setattr(cli, "CONFIG_FILE", tmp_path / ".yread" / "config.env")
+    (tmp_path / "README.md").write_text("# Demo\n")
+    (tmp_path / "pyproject.toml").write_text('[project.scripts]\ndemo = "demo.cli:main"\n')
+    (tmp_path / "src" / "demo").mkdir(parents=True)
+    (tmp_path / "src" / "demo" / "cli.py").write_text("def main(): pass\n")
+
+    assert cli.main(["profile", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"Project: {tmp_path}" in out
+    assert "primary_languages: Python" in out
+    assert "package_files:     pyproject.toml" in out
+    assert "entry_points:      src/demo/cli.py" in out
+    assert "doc_depth:         auto -> brief" in out
+    assert "total_loc:         1   (code 1, blank 0)" in out
+    assert "signals:           readme" in out  # booleans folded into one compact line
+    assert "has_readme:" not in out            # replaced by quantitative metrics
+    assert "code:" in out
+    assert "avg_file:" in out
+    assert "languages:" in out
+    assert "github:" not in out  # tmp_path is not a git repo -> no network
+
+
+def test_language_stats_counts_files_and_lines(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('a')\nprint('b')\n")      # 2 lines
+    (tmp_path / "b.py").write_text("x = 1\n")                        # 1 line
+    (tmp_path / "c.ts").write_text("const a = 1;\n\nconst b = 2;\n")  # 3 lines
+    (tmp_path / "README.md").write_text("# hi\n")                   # not source
+
+    stats = yread.language_stats(tmp_path)
+
+    langs = {s["language"]: s for s in stats}
+    assert langs["Python"]["files"] == 2
+    assert langs["Python"]["loc"] == 3
+    assert langs["TypeScript"]["files"] == 1
+    assert langs["TypeScript"]["loc"] == 3
+    # loc tie -> language ascending (Python before TypeScript)
+    assert [s["language"] for s in stats] == ["Python", "TypeScript"]
+
+
+def test_code_stats_splits_code_blank_and_tests(tmp_path: Path) -> None:
+    (tmp_path / "core.py").write_text("x = 1\n\n\ny = 2\n")            # 4 loc, 2 code, 2 blank
+    (tmp_path / "small.py").write_text("z = 3\n")                     # 1 loc, 1 code
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_core.py").write_text("a = 1\nb = 2\n")  # 2 loc, test
+
+    stats = yread.code_stats(tmp_path)
+
+    assert stats["source_files"] == 3
+    assert stats["total_loc"] == 7          # 4 + 1 + 2
+    assert stats["code_loc"] == 5           # 2 + 1 + 2
+    assert stats["blank_loc"] == 2
+    assert stats["test_files"] == 1
+    assert stats["test_loc"] == 2
+    assert stats["test_ratio"] == round(2 / 5, 2)  # test loc over non-test source loc
+    assert stats["largest"][0] == {"path": "core.py", "loc": 4}  # largest excludes tests
+    assert stats["avg_file_loc"] == round(5 / 2)   # non-test source only
+
+
+def test_parse_github_remote_handles_ssh_https_and_non_github() -> None:
+    assert yread.parse_github_remote("git@github.com:owner/repo.git") == ("owner", "repo")
+    assert yread.parse_github_remote("https://github.com/owner/repo.git") == ("owner", "repo")
+    assert yread.parse_github_remote("https://github.com/owner/repo") == ("owner", "repo")
+    assert yread.parse_github_remote("https://gitlab.com/owner/repo.git") is None
+    assert yread.parse_github_remote("not a url") is None
+
+
+def test_git_stats_returns_none_outside_git_repo(tmp_path: Path) -> None:
+    assert yread.git_stats(tmp_path) is None
+
+
+def test_git_stats_reports_commits_tag_and_dirty(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+    _git_commit_all(tmp_path, "init")
+    subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.1.0"], check=True, capture_output=True)
+
+    stats = yread.git_stats(tmp_path)
+    assert stats is not None
+    assert stats["commits"] == 1
+    assert stats["contributors"] == 1
+    assert stats["current_version"] == "v0.1.0"
+    assert stats["first_commit"] == stats["last_commit"]
+    assert stats["recent_commits_30d"] == 1
+    assert stats["dirty"] is False
+
+    (tmp_path / "b.py").write_text("y = 2\n")  # uncommitted change
+    assert yread.git_stats(tmp_path)["dirty"] is True
+
+
+class _FakeResp:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeResp":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def test_github_repo_info_parses_full_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yread, "_git_remote_origin", lambda _repo: "git@github.com:owner/repo.git")
+    payload = json.dumps({
+        "full_name": "owner/repo",
+        "description": "A demo",
+        "homepage": "https://example.com",
+        "stargazers_count": 1234,
+        "forks_count": 56,
+        "subscribers_count": 12,
+        "open_issues_count": 3,
+        "topics": ["cli", "wiki"],
+        "license": {"spdx_id": "MIT"},
+        "default_branch": "main",
+        "pushed_at": "2024-06-01T00:00:00Z",
+        "archived": False,
+        "fork": True,
+    }).encode()
+    monkeypatch.setattr(yread.urllib.request, "urlopen", lambda _req, timeout=0: _FakeResp(payload))
+
+    info = yread.github_repo_info(tmp_path)
+    assert info["stars"] == 1234
+    assert info["forks"] == 56
+    assert info["watchers"] == 12
+    assert info["open_issues"] == 3
+    assert info["topics"] == ["cli", "wiki"]
+    assert info["license"] == "MIT"
+    assert info["homepage"] == "https://example.com"
+    assert info["default_branch"] == "main"
+    assert info["is_fork"] is True
+    assert info["error"] is None
+
+
+def test_github_repo_info_uses_github_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yread, "_git_remote_origin", lambda _repo: "https://github.com/o/r")
+    monkeypatch.setenv("GITHUB_TOKEN", "sekret")
+    captured: dict[str, str | None] = {}
+
+    def fake_urlopen(req: object, timeout: float = 0) -> _FakeResp:
+        captured["auth"] = req.get_header("Authorization")  # type: ignore[attr-defined]
+        return _FakeResp(b"{}")
+
+    monkeypatch.setattr(yread.urllib.request, "urlopen", fake_urlopen)
+    yread.github_repo_info(tmp_path)
+    assert captured["auth"] == "Bearer sekret"
+
+
+def test_github_repo_info_reports_http_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yread, "_git_remote_origin", lambda _repo: "https://github.com/o/r")
+
+    def raise_http(_req: object, timeout: float = 0) -> None:
+        raise yread.urllib.error.HTTPError("url", 403, "rate limited", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(yread.urllib.request, "urlopen", raise_http)
+    info = yread.github_repo_info(tmp_path)
+    assert info["stars"] is None
+    assert info["error"] == "HTTP 403"
+
+
+def test_cli_profile_shows_git_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
+    clear_config_env(monkeypatch)
+    monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path / ".yread")
+    monkeypatch.setattr(cli, "CONFIG_FILE", tmp_path / ".yread" / "config.env")
+    (tmp_path / "main.py").write_text("print('hi')\n")
+    _init_git_repo(tmp_path)
+    _git_commit_all(tmp_path, "init")
+
+    assert cli.main(["profile", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "git:" in out
+    assert "commits:           1" in out
+    assert "contributors:      1" in out
+    assert "github:" not in out  # no origin remote -> no network
 
 
 def test_topic_budget_for_depth_respects_max_topics() -> None:

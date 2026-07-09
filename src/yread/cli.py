@@ -24,6 +24,7 @@ CONFIG_KEYS = {
     "CONCURRENCY",
     "ENABLE_SHELL",
     "OUTPUT_DIR",
+    "GITHUB_TOKEN",
 }
 
 
@@ -68,6 +69,10 @@ def _build_parser() -> argparse.ArgumentParser:
     browse.add_argument("--repo", default=None, help="Source repository for source links")
 
     sub.add_parser("version", help="Print the version number")
+
+    profile = sub.add_parser("profile", help="Print the project profile without calling an LLM")
+    profile.add_argument("repo_path", nargs="?", default=".",
+                         help="Repository to analyze (default: current directory)")
 
     config = sub.add_parser("config", help=f"Manage {CONFIG_FILE}")
     config_sub = config.add_subparsers(dest="config_command")
@@ -153,6 +158,89 @@ def _run_browse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_profile(args: argparse.Namespace) -> int:
+    repo = Path(args.repo_path).resolve()
+    profile = core.build_project_profile(repo)
+    config = _read_config()
+    requested = (core._env_get(config, "DOC_DEPTH", "auto") or "auto").strip().lower()
+    resolved = core.resolve_doc_depth(profile, requested)
+    languages = core.language_stats(repo)
+    code = core.code_stats(repo)
+    signals = [name for name, on in (("readme", profile.has_readme),
+                                     ("tests", profile.has_tests),
+                                     ("ci", profile.has_ci)) if on]
+    print(f"Project: {repo}")
+    print(f"total_files:       {profile.total_files}")
+    print(f"source_files:      {profile.source_files}")
+    print(f"total_loc:         {code['total_loc']}   (code {code['code_loc']}, blank {code['blank_loc']})")
+    print(f"primary_languages: {', '.join(profile.primary_languages) or '-'}")
+    print(f"max_depth:         {profile.max_depth}")
+    print(f"package_files:     {', '.join(profile.package_files) or '-'}")
+    print(f"entry_points:      {', '.join(profile.entry_points) or '-'}")
+    print(f"signals:           {', '.join(signals) or '-'}")
+    if requested == resolved:
+        print(f"doc_depth:         {resolved}")
+    else:
+        print(f"doc_depth:         {requested} -> {resolved}")
+    print()
+    print("code:")
+    print(f"  avg_file:          {code['avg_file_loc']} loc")
+    if code["test_files"]:
+        print(f"  tests:             {code['test_files']} files, {code['test_loc']} loc"
+              f"  ({code['test_ratio']:.2f}x source)")
+    else:
+        print("  tests:             none")
+    if code["largest"]:
+        print("  largest:")
+        for f in code["largest"][:3]:
+            print(f"    {f['path']:<30} {f['loc']:>6} loc")
+    if languages:
+        print()
+        print("languages:")
+        for s in languages:
+            print(f"  {s['language']:<14} {s['files']:>3} files  {s['loc']:>6} loc")
+    stats = core.git_stats(repo)
+    if stats:
+        print()
+        print("git:")
+        print(f"  commits:           {stats['commits']}")
+        if stats["first_commit"] and stats["last_commit"]:
+            print(f"  history:           {stats['first_commit']} -> {stats['last_commit']}")
+        print(f"  recent_30d:        {stats['recent_commits_30d']} commits")
+        print(f"  contributors:      {stats['contributors']}")
+        print(f"  current_version:   {stats['current_version'] or '-'}")
+        print(f"  dirty:             {str(stats['dirty']).lower()}")
+    gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))
+    if gh:
+        stars = gh.get("stars")
+        star_str = str(stars) if stars is not None else "n/a"
+        if gh.get("error"):
+            star_str += f" ({gh['error']})"
+        print()
+        print(f"github: {gh['full_name']}  stars: {star_str}")
+        if gh.get("description"):
+            print(f"  description:       {gh['description']}")
+        forks, watchers, issues = gh.get("forks"), gh.get("watchers"), gh.get("open_issues")
+        if any(v is not None for v in (forks, watchers, issues)):
+            print(f"  forks: {forks if forks is not None else '-'}   "
+                  f"watchers: {watchers if watchers is not None else '-'}   "
+                  f"open_issues: {issues if issues is not None else '-'}")
+        if gh.get("topics"):
+            print(f"  topics:            {', '.join(gh['topics'])}")
+        if gh.get("license"):
+            print(f"  license:           {gh['license']}")
+        if gh.get("homepage"):
+            print(f"  homepage:          {gh['homepage']}")
+        if gh.get("default_branch"):
+            print(f"  default_branch:    {gh['default_branch']}")
+        if gh.get("pushed_at"):
+            print(f"  last_push:         {gh['pushed_at'][:10]}")
+        flags = [f for f, on in (("archived", gh.get("archived")), ("fork", gh.get("is_fork"))) if on]
+        if flags:
+            print(f"  flags:             {', '.join(flags)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -163,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_config(args)
     if args.command == "browse":
         return _run_browse(args)
+    if args.command == "profile":
+        return _run_profile(args)
     if args.command == "generate":
         config = core.config_from_args(args, config_files=[CONFIG_FILE])
         core.run_generate(args, config)

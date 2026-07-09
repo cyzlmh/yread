@@ -42,6 +42,8 @@ import re
 import shlex
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -425,6 +427,15 @@ def build_file_manifest(repo: Path) -> dict:
     }
 
 
+def _is_test_path(rel: str) -> bool:
+    name = Path(rel).name
+    return (
+        rel == "tests" or rel.startswith("tests/")
+        or name.startswith("test_")
+        or name.endswith(".test.ts") or name.endswith(".test.js")
+    )
+
+
 def build_project_profile(repo: Path) -> ProjectProfile:
     repo = repo.resolve()
     files = iter_source_files(repo)
@@ -445,11 +456,7 @@ def build_project_profile(repo: Path) -> ProjectProfile:
     package_files = [name for name in PACKAGE_FILES if (repo / name).is_file()]
     entry_points = _detect_entry_points(repo, rel_paths, package_files)
     has_readme = any(Path(path).name.lower().startswith("readme") for path in rel_paths)
-    has_tests = any(
-        path == "tests" or path.startswith("tests/") or Path(path).name.startswith("test_")
-        or Path(path).name.endswith(".test.ts") or Path(path).name.endswith(".test.js")
-        for path in rel_paths
-    )
+    has_tests = any(_is_test_path(path) for path in rel_paths)
     has_ci = (repo / ".github" / "workflows").is_dir() or any(
         path in {".gitlab-ci.yml", "azure-pipelines.yml"} for path in rel_paths
     )
@@ -528,6 +535,175 @@ def topic_budget_for_depth(depth: str, max_topics: int) -> int:
 
 def profile_summary(profile: ProjectProfile) -> str:
     return json.dumps(asdict(profile), ensure_ascii=False, indent=2)
+
+
+def language_stats(repo: Path) -> list[dict]:
+    """Per-language file counts and source lines for source files, sorted by
+    lines descending then language. Lines are total source lines (wc -l style,
+    including blank and comment lines)."""
+    repo = repo.resolve()
+    stats: dict[str, dict[str, int]] = {}
+    for path in iter_source_files(repo):
+        lang = SOURCE_EXTENSIONS.get(path.suffix.lower())
+        if not lang:
+            continue
+        try:
+            loc = len(path.read_text(errors="replace").splitlines())
+        except OSError:
+            continue
+        entry = stats.setdefault(lang, {"files": 0, "loc": 0})
+        entry["files"] += 1
+        entry["loc"] += loc
+    return [
+        {"language": lang, "files": s["files"], "loc": s["loc"]}
+        for lang, s in sorted(stats.items(), key=lambda kv: (-kv[1]["loc"], kv[0]))
+    ]
+
+
+def code_stats(repo: Path) -> dict:
+    """Substance metrics over source files from a single walk: total/code/blank
+    lines, average and largest non-test files, and a test-vs-source split. Gives
+    a feel for how much real code a project carries and how heavily it is tested.
+    ``code`` counts non-blank source lines; comments are not separated out."""
+    repo = repo.resolve()
+    rows: list[tuple[str, int, int, bool]] = []  # (rel, loc, code_loc, is_test)
+    for path in iter_source_files(repo):
+        if SOURCE_EXTENSIONS.get(path.suffix.lower()) is None:
+            continue
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        rel = path.relative_to(repo).as_posix()
+        code = sum(1 for line in lines if line.strip())
+        rows.append((rel, len(lines), code, _is_test_path(rel)))
+    source = [r for r in rows if not r[3]]
+    tests = [r for r in rows if r[3]]
+    total_loc = sum(r[1] for r in rows)
+    code_loc = sum(r[2] for r in rows)
+    source_loc = sum(r[1] for r in source)
+    test_loc = sum(r[1] for r in tests)
+    ranked = sorted(source or rows, key=lambda r: (-r[1], r[0]))
+    denom = len(source) or len(rows)
+    return {
+        "source_files": len(rows),
+        "total_loc": total_loc,
+        "code_loc": code_loc,
+        "blank_loc": total_loc - code_loc,
+        "avg_file_loc": round((source_loc or total_loc) / denom) if denom else 0,
+        "largest": [{"path": r[0], "loc": r[1]} for r in ranked[:5]],
+        "test_files": len(tests),
+        "test_loc": test_loc,
+        "test_ratio": round(test_loc / source_loc, 2) if source_loc else 0.0,
+    }
+
+
+GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?(?:/|$)")
+
+
+def parse_github_remote(url: str) -> tuple[str, str] | None:
+    """Extract (owner, repo) from a GitHub remote URL, or None if not GitHub."""
+    m = GITHUB_REMOTE_RE.search(url)
+    if not m:
+        return None
+    owner, repo = m.group(1), m.group(2)
+    if not owner or not repo:
+        return None
+    return owner, repo
+
+
+def _git_output(repo: Path, args: list[str], timeout: float = 5.0) -> str | None:
+    """Run a read-only git command in ``repo`` and return trimmed stdout, or None
+    when git is unavailable or the command fails. stdin is closed so commands like
+    ``git shortlog`` never block waiting on it."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=timeout,
+            check=False, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip()
+
+
+def _git_remote_origin(repo: Path) -> str | None:
+    url = _git_output(repo, ["remote", "get-url", "origin"])
+    return url or None
+
+
+def git_stats(repo: Path, timeout: float = 5.0) -> dict | None:
+    """Return local git activity for ``repo`` — commit count, history span,
+    recent activity, contributor count, latest tag, and dirty state — or None
+    when it is not a git repository or git is unavailable. No network calls."""
+    repo = repo.resolve()
+    if _git_output(repo, ["rev-parse", "--git-dir"], timeout) is None:
+        return None
+
+    def _count(args: list[str]) -> int:
+        out = _git_output(repo, args, timeout)
+        return int(out) if out and out.isdigit() else 0
+
+    roots = _git_output(repo, ["log", "--max-parents=0", "--format=%cs"], timeout)
+    status = _git_output(repo, ["status", "--porcelain"], timeout)
+    shortlog = _git_output(repo, ["shortlog", "-sn", "--all"], timeout)
+    return {
+        "commits": _count(["rev-list", "--count", "HEAD"]),
+        "first_commit": min(roots.splitlines()) if roots else None,
+        "last_commit": _git_output(repo, ["log", "-1", "--format=%cs"], timeout) or None,
+        "recent_commits_30d": _count(["rev-list", "--count", "--since=30 days ago", "HEAD"]),
+        "contributors": len(shortlog.splitlines()) if shortlog else 0,
+        "current_version": _git_output(repo, ["describe", "--tags", "--abbrev=0"], timeout) or None,
+        "dirty": bool(status) if status is not None else False,
+    }
+
+
+def github_repo_info(repo: Path, timeout: float = 6.0, token: str | None = None) -> dict | None:
+    """Return GitHub repo info for the repo's origin remote, or None when the
+    repo is not a git repo or has no GitHub remote. On failure the dict carries
+    an ``error`` (``HTTP <code>`` or ``offline``) and null metrics. Makes one
+    network call. ``token`` (falling back to ``GITHUB_TOKEN``) raises rate limits
+    and unlocks private repos."""
+    url = _git_remote_origin(repo)
+    if not url:
+        return None
+    parsed = parse_github_remote(url)
+    if not parsed:
+        return None
+    owner, name = parsed
+    full_name = f"{owner}/{name}"
+    headers = {"User-Agent": "yread", "Accept": "application/vnd.github+json"}
+    token = token or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    api = f"https://api.github.com/repos/{owner}/{name}"
+    req = urllib.request.Request(api, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return {"full_name": full_name, "stars": None, "error": f"HTTP {exc.code}"}
+    except (OSError, ValueError):
+        return {"full_name": full_name, "stars": None, "error": "offline"}
+    license_info = data.get("license") or {}
+    return {
+        "full_name": data.get("full_name", full_name),
+        "description": data.get("description"),
+        "homepage": data.get("homepage") or None,
+        "stars": data.get("stargazers_count"),
+        "forks": data.get("forks_count"),
+        "watchers": data.get("subscribers_count"),
+        "open_issues": data.get("open_issues_count"),
+        "topics": data.get("topics") or [],
+        "license": license_info.get("spdx_id"),
+        "default_branch": data.get("default_branch"),
+        "pushed_at": data.get("pushed_at"),
+        "archived": bool(data.get("archived")),
+        "is_fork": bool(data.get("fork")),
+        "error": None,
+    }
 
 
 def load_manifest(output_root: Path) -> dict | None:
