@@ -21,6 +21,12 @@ venv/
 .env.yread.local
 .pytest_cache/
 
+# AI agents
+CLAUDE.md
+AGENTS.md
+.agents/
+.claude/
+
 # IDE
 .idea/
 .vscode/
