@@ -342,9 +342,16 @@ def _gitignore_names(repo: Path) -> set[str]:
     gi = repo / ".gitignore"
     if gi.exists():
         for line in gi.read_text(errors="replace").splitlines():
-            line = line.strip().strip("/")
-            if line and not line.startswith("#") and "*" not in line:
-                names.add(line.split("/")[0])
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("!"):
+                continue
+            # Only collect simple name patterns (possibly rooted). Patterns that
+            # target nested paths like apps/foo/bar/ must not cause the top-level
+            # directory to be ignored wholesale.
+            stripped = line.strip("/")
+            if "*" in stripped or "/" in stripped:
+                continue
+            names.add(stripped)
     return names
 
 

@@ -464,6 +464,42 @@ def test_iter_source_files_skips_vendored_dirs(tmp_path: Path) -> None:
     assert rels == {"app.swift"}
 
 
+def test_gitignore_nested_path_does_not_ignore_parent(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text(
+        "apps/hanzi-picturebook/studio/archive/\n"
+        "logs/\n"
+        "!.env.example\n"
+    )
+    (tmp_path / "apps" / "portal" / "public").mkdir(parents=True)
+    (tmp_path / "apps" / "portal" / "public" / "app.js").write_text("console.log('hi')\n")
+    (tmp_path / "apps" / "hanzi-picturebook" / "studio" / "archive").mkdir(parents=True)
+    (tmp_path / "apps" / "hanzi-picturebook" / "studio" / "archive" / "old.js").write_text("old\n")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "debug.log").write_text("debug\n")
+
+    rels = {p.relative_to(tmp_path).as_posix() for p in yread.iter_source_files(tmp_path)}
+
+    # Nested gitignore paths must not cause the parent directory to disappear.
+    assert "apps/portal/public/app.js" in rels
+    # Simple name patterns should still be ignored at any level.
+    assert "logs/debug.log" not in rels
+
+
+def test_gitignore_names_parses_simple_patterns_only(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text(
+        "node_modules/\n"
+        "/dist/\n"
+        "apps/foo/bar/\n"
+        "!.env.example\n"
+        "*.log\n"
+        "# comment\n"
+    )
+    names = yread._gitignore_names(tmp_path)
+
+    # Only simple name patterns are promoted to global ignore names.
+    assert names == {"node_modules", "dist"}
+
+
 
 def test_parse_github_remote_handles_ssh_https_and_non_github() -> None:
     assert yread.parse_github_remote("git@github.com:owner/repo.git") == ("owner", "repo")
