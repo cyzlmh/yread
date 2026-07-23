@@ -113,6 +113,31 @@ flags. Set `GITHUB_TOKEN` for higher rate limits and private repos. On failure
 the star line shows `n/a` with the reason (`offline` or `HTTP <code>`, e.g. a
 rate-limited or private repo).
 
+## Documentation Mode
+
+Not every repository is a conventional software project. For ML / model projects —
+training, fine-tuning, conversion, or deployment — the substance lives in configs,
+training recipes, and model artifacts, which a pure architecture view under-weights.
+
+`MODE` selects the documentation mode. It is explicit — there is no
+auto-detection:
+
+- `software` (default) — the standard architecture-first lens.
+- `ml` — treats configs, training recipes, and shell scripts as primary evidence,
+  and unlocks extra topic kinds: `model-architecture`, `training`, `data-pipeline`,
+  `evaluation`, `model-conversion`, and `model-serving`. Binary weights are not read
+  as text — the agent is told to infer the model inventory from configs and
+  export/convert scripts instead.
+
+```bash
+yread config set MODE ml        # switch to the ML lens
+yread generate /path/to/repo --mode ml   # or per run
+```
+
+To decide which mode a repo needs, run `yread profile`: an `Assets` section
+surfaces model weights and datasets — the files a source-line count ignores — with
+counts and sizes. If it lists weights, reach for `--mode ml`.
+
 ## Provider Configuration
 
 `yread` can use `minimax-cn`, `deepseek`, or any OpenAI Chat Completions compatible endpoint.
@@ -148,14 +173,23 @@ yread config set BASE_URL https://api.example.com/v1
 yread config set API_KEY sk-...
 yread config set MODEL your-model
 yread config set DOC_LANG en
-yread config set DOC_DEPTH standard
+yread config set DEPTH standard
 yread config show
 ```
 
 Config precedence is:
 
 ```text
-process environment > --env-file > ~/.yread/config.env > defaults
+YREAD_* environment variable > --env-file > ~/.yread/config.env > defaults
+```
+
+Keys are **unprefixed** in the config file, in `--env-file`, and with `config set`
+(a dedicated file can't clash with anything). As a **shell environment variable**,
+prefix the key with `YREAD_` so common bare names never collide with unrelated
+variables:
+
+```bash
+YREAD_MODE=ml YREAD_DEPTH=deep yread generate /path/to/repo
 ```
 
 | Key | Default | Description |
@@ -165,13 +199,14 @@ process environment > --env-file > ~/.yread/config.env > defaults
 | `API_KEY` | auto-resolved | Provider API key |
 | `MODEL` | provider default | Model name |
 | `DOC_LANG` | `en` | Documentation language code, e.g. `zh`, `en` |
-| `DOC_DEPTH` | `auto` | `auto`, `brief`, `standard`, or `deep`; controls topic budget and page breadth |
+| `DEPTH` | `brief` | `brief`, `standard`, or `deep`; controls topic budget and page breadth |
+| `MODE` | `software` | `software` or `ml`; documentation mode (see [Documentation Mode](#documentation-mode)) |
 | `MAX_STEPS` | `24` | Max tool-call rounds per agent |
 | `MAX_TOPICS` | `30` | Catalog topic cap |
 | `CONCURRENCY` | `1` | Parallel page agents |
 | `ENABLE_SHELL` | `1` | Expose `run_bash` to agents |
 | `OUTPUT_DIR` | `<repo>/.yread` | Default export directory |
-| `GITHUB_TOKEN` | unset | GitHub token for `profile` — raises API rate limits, unlocks private repos |
+| `GITHUB_TOKEN` | unset | GitHub token for `profile` — raises API rate limits, unlocks private repos. Also honors the standard, unprefixed `GITHUB_TOKEN` environment variable |
 
 For `minimax-cn` and `deepseek`, missing credentials are resolved from `~/.pi/agent/models.json` and `~/.pi/agent/auth.json` when available.
 

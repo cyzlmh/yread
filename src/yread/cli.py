@@ -18,7 +18,8 @@ CONFIG_KEYS = {
     "API_KEY",
     "MODEL",
     "DOC_LANG",
-    "DOC_DEPTH",
+    "DEPTH",
+    "MODE",
     "MAX_STEPS",
     "MAX_TOPICS",
     "CONCURRENCY",
@@ -97,7 +98,8 @@ INIT_PROMPTS = [
     ("API_KEY", "API key", ""),
     ("MODEL", "Model name", ""),
     ("DOC_LANG", "Documentation language code [zh/en]", "en"),
-    ("DOC_DEPTH", "Documentation depth [auto/brief/standard/deep]", "auto"),
+    ("DEPTH", "Documentation depth [brief/standard/deep]", "brief"),
+    ("MODE", "Documentation mode [software/ml]", "software"),
     ("OUTPUT_DIR", "Output directory (blank = <repo>/.yread)", ""),
 ]
 
@@ -158,6 +160,15 @@ def _run_browse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _human_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
 def _run_profile(args: argparse.Namespace) -> int:
     repo = Path(args.repo_path).resolve()
     profile = core.build_project_profile(repo)
@@ -190,6 +201,22 @@ def _run_profile(args: argparse.Namespace) -> int:
         for s in languages:
             plural = "file" if s["files"] == 1 else "files"
             print(f"  {s['language']:<14}{s['loc']:>9,}  {s['files']:>3} {plural}")
+
+    assets = core.asset_inventory(repo)
+    # Surface assets only when they carry weight — model or data artifacts. A
+    # couple of config yamls in a plain software repo are noise, not signal.
+    if assets.keys() & {"weights", "data"}:
+        print()
+        print("Assets")
+        for bucket in ("weights", "configs", "data"):
+            entry = assets.get(bucket)
+            if not entry:
+                continue
+            plural = "file" if entry["files"] == 1 else "files"
+            exts = " ".join(f"{ext}×{n}" for ext, n in
+                            sorted(entry["exts"].items(), key=lambda kv: (-kv[1], kv[0])))
+            size = f" · {_human_bytes(entry['bytes'])}" if entry["bytes"] else ""
+            print(f"  {bucket:<9}{entry['files']:>4} {plural}{size}   {exts}")
 
     stats = core.git_stats(repo)
     gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))

@@ -23,13 +23,15 @@ def _git_commit_all(path: Path, message: str) -> None:
 
 CONFIG_ENV_KEYS = {
     "PROVIDER", "BASE_URL", "API_KEY", "MODEL", "DOC_LANG",
-    "DOC_DEPTH", "MAX_STEPS", "MAX_TOPICS", "CONCURRENCY", "ENABLE_SHELL", "OUTPUT_DIR",
+    "DEPTH", "MODE", "MAX_STEPS", "MAX_TOPICS", "CONCURRENCY",
+    "ENABLE_SHELL", "OUTPUT_DIR",
 }
 
 
 def clear_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in CONFIG_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv(key, raising=False)          # bare (legacy / GITHUB_TOKEN fallback)
+        monkeypatch.delenv(f"YREAD_{key}", raising=False)  # namespaced override
 
 
 def write_page(root: Path, page: dict, text: str) -> None:
@@ -48,7 +50,7 @@ def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pyte
             "API_KEY=test-key",
             "MODEL=test-model",
             "DOC_LANG=English",
-            "DOC_DEPTH=deep",
+            "DEPTH=deep",
             "CONCURRENCY=3",
             "ENABLE_SHELL=0",
         ])
@@ -59,7 +61,7 @@ def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pyte
     settings = yread.resolve_provider(config)
 
     assert config.doc_lang == "English"
-    assert config.doc_depth == "deep"
+    assert config.depth == "deep"
     assert config.concurrency == 3
     assert config.enable_shell is False
     assert settings.base_url == "https://llm.example/v1"
@@ -74,17 +76,31 @@ def test_default_doc_language_is_en(monkeypatch: pytest.MonkeyPatch) -> None:
     config = yread.config_from_args(args)
 
     assert config.doc_lang == "en"
-    assert config.doc_depth == "auto"
+    assert config.depth == "brief"
+    assert config.mode == "software"
     assert yread.lang_name(config.doc_lang) == "English"
 
 
-def test_invalid_doc_depth_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invalid_depth_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_config_env(monkeypatch)
-    monkeypatch.setenv("DOC_DEPTH", "full")
+    monkeypatch.setenv("YREAD_DEPTH", "full")
     args = yread.build_arg_parser().parse_args(["."])
 
-    with pytest.raises(SystemExit, match="DOC_DEPTH must be one of"):
+    with pytest.raises(SystemExit, match="DEPTH must be one of"):
         yread.config_from_args(args)
+
+
+def test_env_override_requires_yread_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_config_env(monkeypatch)
+    config_file = tmp_path / "config.env"
+    config_file.write_text("MODE=ml\n")  # config file uses the bare key
+    # A bare MODE in the environment must NOT clash with yread's config...
+    monkeypatch.setenv("MODE", "software")
+    args = yread.build_arg_parser().parse_args(["."])
+    assert yread.config_from_args(args, config_files=[config_file]).mode == "ml"
+    # ...only the namespaced YREAD_MODE overrides.
+    monkeypatch.setenv("YREAD_MODE", "software")
+    assert yread.config_from_args(args, config_files=[config_file]).mode == "software"
 
 
 def test_config_file_drives_output_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,7 +161,8 @@ def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                          capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path / ".yread")
     monkeypatch.setattr(cli, "CONFIG_FILE", tmp_path / ".yread" / "config.env")
-    answers = iter(["deepseek", "https://api.deepseek.com/v1", "sk-test", "deepseek-v4-pro", "zh", "standard", ""])
+    answers = iter(["deepseek", "https://api.deepseek.com/v1", "sk-test", "deepseek-v4-pro",
+                    "zh", "standard", "ml", ""])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert cli.main(["config", "init"]) == 0
@@ -154,7 +171,8 @@ def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     out = capsys.readouterr().out
     assert "PROVIDER=deepseek" in out
     assert "DOC_LANG=zh" in out
-    assert "DOC_DEPTH=standard" in out
+    assert "DEPTH=standard" in out
+    assert "MODE=ml" in out
     assert "OUTPUT_DIR" not in out  # left blank -> not written
 
 
@@ -195,7 +213,7 @@ def test_wiki_index_records_source_root(tmp_path: Path) -> None:
                            "en", "brief", profile, {}, source_root=tmp_path / "repo")
     meta = json.loads((output_root / "wiki.json").read_text())
     assert meta["schema_version"] == 2
-    assert meta["doc_depth"] == "brief"
+    assert meta["depth"] == "brief"
     assert meta["project_profile"]["has_readme"] is True
     assert meta["source_root"] == str(tmp_path / "repo")
     assert meta["pages"][0]["file"] == "wiki/a.md"
@@ -367,7 +385,6 @@ def test_project_profile_detects_repo_shape(tmp_path: Path) -> None:
     assert profile.primary_languages == ["Python"]
     assert "pyproject.toml" in profile.package_files
     assert "src/demo/cli.py" in profile.entry_points
-    assert yread.resolve_doc_depth(profile, "auto") == "brief"
 
 
 def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
@@ -392,7 +409,7 @@ def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
     assert "avg" in out
     assert "primary_languages" not in out  # redundant with the Languages line
     assert "signals" not in out            # low-signal fields dropped
-    assert "doc_depth" not in out
+    assert "max_depth" not in out          # humanized as "depth N", raw field not dumped
     assert "GitHub" not in out  # tmp_path is not a git repo -> no network
 
 
@@ -639,7 +656,7 @@ def test_generate_writes_flat_output_root_and_overwrites_previous_pages(
         api_key=settings.api_key,
         model=settings.model,
         doc_lang="en",
-        doc_depth="brief",
+        depth="brief",
         max_steps=1,
         max_topics=3,
         concurrency=1,
@@ -716,7 +733,7 @@ def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monke
         api_key=settings.api_key,
         model=settings.model,
         doc_lang="English",
-        doc_depth="brief",
+        depth="brief",
         max_steps=1,
         max_topics=2,
         concurrency=1,
@@ -728,3 +745,82 @@ def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monke
     assert ok is False
     assert "model returned invalid output" in error
     assert target.read_text() == "# Previous good page\n"
+
+
+# --------------------------------------------------------------------------- #
+# ML/model project lens                                                        #
+# --------------------------------------------------------------------------- #
+
+def test_asset_inventory_buckets(tmp_path: Path) -> None:
+    (tmp_path / "m.onnx").write_bytes(b"abc")
+    (tmp_path / "train_cfg.yaml").write_text("lr: 0.1\n")
+    (tmp_path / "sample.mp3").write_bytes(b"xy")
+    (tmp_path / "core.py").write_text("x = 1\n")
+    inv = yread.asset_inventory(tmp_path)
+    assert inv["weights"]["files"] == 1 and inv["weights"]["exts"] == {".onnx": 1}
+    assert inv["configs"]["files"] == 1
+    assert inv["data"]["files"] == 1
+    assert "core.py" not in str(inv)
+
+
+def test_build_profile_populates_ml_fields(tmp_path: Path) -> None:
+    (tmp_path / "model.pth").write_bytes(b"\x00")
+    (tmp_path / "cfg.yaml").write_text("a: 1\n")
+    (tmp_path / "data.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "main.py").write_text("print(1)\n")
+    profile = yread.build_project_profile(tmp_path)
+    assert profile.model_files == 1
+    assert profile.config_files == 1
+    assert profile.data_files == 1
+
+
+def test_preset_for_ml_unlocks_kinds() -> None:
+    allowed, catalog_guidance, page_guidance = yread.preset_for("ml")
+    assert "model-architecture" in allowed and "training" in allowed
+    assert "overview" in allowed  # base kinds still valid
+    assert catalog_guidance and page_guidance
+    base_allowed, base_cat, base_page = yread.preset_for("software")
+    assert "model-architecture" not in base_allowed
+    assert base_cat == "" and base_page == ""
+
+
+def test_parse_catalog_ml_kind_requires_allowed_kinds() -> None:
+    raw = """
+<section>
+Models
+<topic kind="model-architecture" level="Intermediate" files="modeling.py">
+Model Architecture
+</topic>
+</section>
+"""
+    with pytest.raises(ValueError, match="invalid or missing kind"):
+        yread.parse_catalog(raw)  # base kinds reject the ml kind
+    pages = yread.parse_catalog(raw, yread.TOPIC_KINDS | yread.ML_TOPIC_KINDS)
+    assert pages[0]["kind"] == "model-architecture"
+
+
+def test_view_file_binary_weight_is_not_dumped(tmp_path: Path) -> None:
+    (tmp_path / "model.onnx").write_bytes(b"\x00\x01\x02\xff\xfe")
+    out = yread.view_file_in_detail(tmp_path, "model.onnx")
+    assert "binary model artifact" in out
+    assert "not readable as text" in out
+
+
+def test_config_from_args_reads_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_config_env(monkeypatch)
+    env = tmp_path / ".env.yread"
+    env.write_text("MODE=ml\n")
+    parser = yread.build_arg_parser()
+    args = parser.parse_args([str(tmp_path), "--env-file", str(env)])
+    config = yread.config_from_args(args)
+    assert config.mode == "ml"
+
+
+def test_mode_cli_flag_overrides_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_config_env(monkeypatch)
+    env = tmp_path / ".env.yread"
+    env.write_text("MODE=ml\n")
+    parser = yread.build_arg_parser()
+    args = parser.parse_args([str(tmp_path), "--env-file", str(env), "--mode", "software"])
+    config = yread.config_from_args(args)
+    assert config.mode == "software"

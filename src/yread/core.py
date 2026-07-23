@@ -11,13 +11,16 @@ bash) and explore the repo themselves before writing.
 Usage:
     yread generate [repo_path] [--env-file .env.yread]   (repo_path defaults to .)
 
-Config via env:
+Config keys (bare name in the config file / --env-file; as a shell environment
+variable, prefix with YREAD_, e.g. YREAD_MODE=ml, to avoid clashing with unrelated
+variables):
     PROVIDER    which LLM provider to use     (minimax-cn | deepseek | openai-compatible)
     BASE_URL    override the provider endpoint (else resolved per provider)
     API_KEY     override the key              (else resolved per provider)
     MODEL       override the model name       (else the provider's default)
     DOC_LANG    documentation language code  (default en; e.g. zh | en; NOT $LANG)
-    DOC_DEPTH   documentation depth          (default auto; auto | brief | standard | deep)
+    DEPTH       documentation depth          (default brief; brief | standard | deep)
+    MODE        documentation mode           (default software; software | ml)
     MAX_STEPS   tool-call rounds per agent   (default 24)
     MAX_TOPICS  catalog topic cap            (default 30)
     CONCURRENCY parallel page agents          (default 1)
@@ -72,10 +75,17 @@ SENSITIVE_NAMES = {
 }
 SENSITIVE_GLOBS = ("*.pem", "*.key", "*.p12", "*.pfx")
 
-DOC_DEPTHS = {"auto", "brief", "standard", "deep"}
+DEPTHS = {"brief", "standard", "deep"}
+MODES = {"software", "ml"}
 TOPIC_KINDS = {
     "overview", "quickstart", "architecture", "concepts", "runtime-flow",
     "extension-points", "tradeoffs", "change-guide", "reference",
+}
+# Extra topic kinds unlocked for ML/model projects, where the substance lives in
+# training recipes, model artifacts, and data pipelines rather than call graphs.
+ML_TOPIC_KINDS = {
+    "data-pipeline", "model-architecture", "training",
+    "evaluation", "model-conversion", "model-serving",
 }
 REQUIRED_TOPIC_KINDS = {"overview"}
 
@@ -121,6 +131,19 @@ ENTRYPOINT_PATTERNS = (
     "src/main.js", "src/index.js", "cmd", "main.go",
 )
 
+# ML/model project signals. Weight/checkpoint artifacts, datasets, and training
+# configs carry the logic in these repos but are invisible to a code-line count.
+MODEL_WEIGHT_EXTS = {
+    ".pth", ".pt", ".safetensors", ".ckpt", ".onnx", ".om", ".gguf",
+    ".h5", ".tflite", ".pb", ".engine", ".plan", ".mlmodel", ".bin", ".npz",
+}
+DATASET_EXTS = {
+    ".csv", ".tsv", ".parquet", ".arrow", ".jsonl",
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg",
+    ".mp4", ".avi", ".mov", ".mkv",
+    ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".npy",
+}
+
 WIKI_PAGE_DIR = "wiki"
 
 
@@ -131,11 +154,12 @@ class RuntimeConfig:
     api_key: str | None
     model: str | None
     doc_lang: str
-    doc_depth: str
+    depth: str
     max_steps: int
     max_topics: int
     concurrency: int
     enable_shell: bool
+    mode: str = "software"
     output_dir: Path | None = None
     env_file: Path | None = None
 
@@ -159,6 +183,9 @@ class ProjectProfile:
     has_ci: bool
     package_files: list[str]
     entry_points: list[str]
+    model_files: int = 0
+    config_files: int = 0
+    data_files: int = 0
 
 
 def load_pi_provider(name: str) -> tuple[str, str]:
@@ -214,8 +241,11 @@ def _parse_env_files(paths: list[Path]) -> dict[str, str]:
 
 
 def _env_get(file_env: dict[str, str], name: str, default: str | None = None) -> str | None:
-    # Precedence: process env > env file > default.
-    return os.environ.get(name, file_env.get(name, default))
+    # Precedence: YREAD_<NAME> process env > env file / config.env > default.
+    # Environment overrides are namespaced with a YREAD_ prefix so bare, common
+    # names (MODE, DEPTH, MODEL, ...) never clash with unrelated shell variables.
+    # Config-file and --env-file keys stay unprefixed — a dedicated file can't clash.
+    return os.environ.get("YREAD_" + name, file_env.get(name, default))
 
 
 def _env_bool(file_env: dict[str, str], name: str, default: bool) -> bool:
@@ -257,8 +287,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Regenerate pages even when output files already exist")
     p.add_argument("--output-dir", type=Path, default=None,
                    help="Yread output directory (overrides OUTPUT_DIR config)")
-    p.add_argument("--doc-depth", choices=sorted(DOC_DEPTHS), default=None,
-                   help="Documentation depth: auto, brief, standard, or deep")
+    p.add_argument("--depth", choices=sorted(DEPTHS), default=None,
+                   help="Documentation depth: brief, standard, or deep (default brief)")
+    p.add_argument("--mode", choices=sorted(MODES), default=None,
+                   help="Documentation mode: software or ml (default software)")
     return p
 
 
@@ -277,9 +309,12 @@ def config_from_args(args: argparse.Namespace, config_files: list[Path] | None =
     concurrency = _env_int(file_env, "CONCURRENCY", 1)
     if concurrency < 1:
         raise SystemExit("CONCURRENCY must be >= 1")
-    doc_depth = _env_choice(file_env, "DOC_DEPTH", "auto", DOC_DEPTHS)
-    if getattr(args, "doc_depth", None):
-        doc_depth = args.doc_depth
+    depth = _env_choice(file_env, "DEPTH", "brief", DEPTHS)
+    if getattr(args, "depth", None):
+        depth = args.depth
+    mode = _env_choice(file_env, "MODE", "software", MODES)
+    if getattr(args, "mode", None):
+        mode = args.mode
     raw_output_dir = _env_get(file_env, "OUTPUT_DIR")
     output_dir: Path | None = Path(raw_output_dir).expanduser() if raw_output_dir else None
     if getattr(args, "output_dir", None):
@@ -290,11 +325,12 @@ def config_from_args(args: argparse.Namespace, config_files: list[Path] | None =
         api_key=_env_get(file_env, "API_KEY"),
         model=_env_get(file_env, "MODEL"),
         doc_lang=_env_get(file_env, "DOC_LANG", "en") or "en",
-        doc_depth=doc_depth,
+        depth=depth,
         max_steps=_env_int(file_env, "MAX_STEPS", 24),
         max_topics=_env_int(file_env, "MAX_TOPICS", 30),
         concurrency=concurrency,
         enable_shell=_env_bool(file_env, "ENABLE_SHELL", True),
+        mode=mode,
         output_dir=output_dir,
         env_file=args.env_file,
     )
@@ -462,6 +498,40 @@ def _is_test_path(rel: str) -> bool:
     )
 
 
+def classify_asset(ext: str) -> str | None:
+    """Bucket a non-code file by extension: weights, configs, or data. Returns
+    None for anything that is not an ML/model asset."""
+    ext = ext.lower()
+    if ext in MODEL_WEIGHT_EXTS:
+        return "weights"
+    if ext in {".yaml", ".yml"}:
+        return "configs"
+    if ext in DATASET_EXTS:
+        return "data"
+    return None
+
+
+def asset_inventory(repo: Path) -> dict[str, dict]:
+    """Bucket non-code assets (model weights, configs, datasets) with counts,
+    byte totals, and per-extension breakdown. ML projects hide their substance
+    in these files, which the source-line profile ignores."""
+    repo = repo.resolve()
+    buckets: dict[str, dict] = {}
+    for path in iter_source_files(repo):
+        bucket = classify_asset(path.suffix)
+        if not bucket:
+            continue
+        entry = buckets.setdefault(bucket, {"files": 0, "bytes": 0, "exts": {}})
+        entry["files"] += 1
+        try:
+            entry["bytes"] += path.stat().st_size
+        except OSError:
+            pass
+        ext = path.suffix.lower()
+        entry["exts"][ext] = entry["exts"].get(ext, 0) + 1
+    return buckets
+
+
 def build_project_profile(repo: Path) -> ProjectProfile:
     repo = repo.resolve()
     files = iter_source_files(repo)
@@ -469,6 +539,7 @@ def build_project_profile(repo: Path) -> ProjectProfile:
     language_counts: dict[str, int] = {}
     source_files = 0
     max_depth = 0
+    asset_counts = {"weights": 0, "configs": 0, "data": 0}
     for rel in rel_paths:
         path = Path(rel)
         max_depth = max(max_depth, len(path.parts))
@@ -476,6 +547,10 @@ def build_project_profile(repo: Path) -> ProjectProfile:
         if lang:
             source_files += 1
             language_counts[lang] = language_counts.get(lang, 0) + 1
+        else:
+            bucket = classify_asset(path.suffix)
+            if bucket:
+                asset_counts[bucket] += 1
     primary_languages = [
         lang for lang, _count in sorted(language_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
     ]
@@ -496,6 +571,9 @@ def build_project_profile(repo: Path) -> ProjectProfile:
         has_ci=has_ci,
         package_files=package_files,
         entry_points=entry_points[:8],
+        model_files=asset_counts["weights"],
+        config_files=asset_counts["configs"],
+        data_files=asset_counts["data"],
     )
 
 
@@ -539,16 +617,6 @@ def _detect_entry_points(repo: Path, rel_paths: list[str], package_files: list[s
                     add(value)
 
     return entries
-
-
-def resolve_doc_depth(profile: ProjectProfile, requested: str) -> str:
-    if requested != "auto":
-        return requested
-    if profile.source_files <= 20 and profile.total_files <= 40:
-        return "brief"
-    if profile.source_files >= 120 or profile.total_files >= 250 or profile.max_depth >= 6:
-        return "deep"
-    return "standard"
 
 
 def topic_budget_for_depth(depth: str, max_topics: int) -> int:
@@ -864,6 +932,11 @@ def view_file_in_detail(repo: Path, file_path: str, start_line: int = 1,
         return f"[error] sensitive file is not readable through this tool: {file_path}"
     if ".yread" in f.parts or ".zread" in f.parts:
         return f"[error] generated wiki output is not part of the source repo: {file_path}"
+    if f.suffix.lower() in MODEL_WEIGHT_EXTS:
+        size = f.stat().st_size
+        return (f"[binary model artifact] {file_path} ({size:,} bytes, {f.suffix.lower()}) — "
+                "weights are not readable as text. Infer this model from its config, "
+                "export/convert scripts, and loader code instead.")
     if end_line is None:
         end_line = start_line + 199
     out = []
@@ -1045,6 +1118,38 @@ def tool_usage_description(enable_shell: bool) -> str:
 # Phase 1 — catalog                                                           #
 # --------------------------------------------------------------------------- #
 
+CATALOG_ML_GUIDANCE = """## ML/Model Project Lens
+This repository is a machine-learning / model project. Treat config files, training
+recipes, and shell scripts as PRIMARY evidence, not noise — in these projects the
+logic lives in configs and model artifacts, not only in call graphs. Beyond the
+software kinds, plan pages for what makes an ML project understandable, using the
+extra kinds where evidence supports them:
+- model-architecture: which models exist, their structure and provenance (base models, fine-tunes, adapters)
+- training: the training/fine-tuning recipe — datasets, objective, key hyperparameters (read *_cfg*.yaml, train*.yaml)
+- data-pipeline: how raw inputs become model-ready tensors (preprocessing, tokenization, feature extraction)
+- evaluation: metrics, benchmarks, and how quality is measured
+- model-conversion: export / quantization / compilation steps (e.g. pth->onnx->om) and the target hardware
+- model-serving: how a trained model is loaded and served for inference (engine, app, runtime target)
+You CANNOT read binary weight files (.pth/.safetensors/.onnx/.om/...). Infer the model
+inventory from configs, export/convert scripts, and loader code — never from the weights."""
+
+PAGE_ML_GUIDANCE = """- For `model-architecture`: describe the model(s), their type/provenance, and structure. Cite config and modeling files, not weights.
+- For `training`: describe the training/fine-tuning recipe — data, objective, key hyperparameters — from *_cfg*.yaml and training scripts.
+- For `data-pipeline`: trace raw input -> model-ready tensors (preprocess, tokenize, feature extraction steps).
+- For `evaluation`: describe metrics and how model quality is measured.
+- For `model-conversion`: explain export/quantization/compilation steps and their target runtime/hardware.
+- For `model-serving`: explain how a trained model is loaded and served for inference.
+- You cannot read binary weights; infer models from configs and scripts, and cite those."""
+
+
+def preset_for(mode: str) -> tuple[set[str], str, str]:
+    """Return (allowed_topic_kinds, catalog_guidance, page_guidance) for a
+    documentation mode. Software projects use the base vocabulary unchanged."""
+    if mode == "ml":
+        return TOPIC_KINDS | ML_TOPIC_KINDS, CATALOG_ML_GUIDANCE, PAGE_ML_GUIDANCE
+    return TOPIC_KINDS, "", ""
+
+
 CATALOG_SYSTEM = """You are an expert software architect and technical writer. Your job is to plan documentation for humans who need to understand a codebase: its purpose, architecture, concepts, runtime flow, extension points, design tradeoffs, and safe change paths.
 
 ## Environment
@@ -1074,7 +1179,7 @@ Use source paths only as evidence for a topic. They are not the topic itself.
 1. Output v2 topics only. Every topic MUST use:
    `<topic kind="..." level="..." files="...">`
 2. `kind` MUST be exactly one of:
-   overview, quickstart, architecture, concepts, runtime-flow, extension-points, tradeoffs, change-guide, reference
+   {kind_list}
 3. `level` should be Beginner, Intermediate, or Advanced.
 4. `files` must contain 1-4 exact relative files or directories that support the page as evidence.
 5. Do not include generated output, dependency directories, secret files, absolute paths, or paths outside the repository.
@@ -1082,13 +1187,15 @@ Use source paths only as evidence for a topic. They are not the topic itself.
 7. Total topic count must not exceed {topic_budget}. Merge or omit lower-value topics to stay within this budget.
 
 ## Depth Policy
-Requested documentation depth: {doc_depth}
+Requested documentation depth: {depth}
 - brief: prioritize Overview, Architecture Map, and one practical change path.
 - standard: add Core Concepts, Runtime Flow, Extension Points, and Design Tradeoffs where supported by evidence.
 - deep: expand important subsystems and maintenance paths, but still avoid file-by-file documentation.
 
 ## Required Priority
 At minimum, include one `overview` topic if supported by any evidence. Prefer also including `architecture`, `concepts`, `runtime-flow`, and `extension-points` when the project has enough substance.
+
+{preset_guidance}
 
 ## Output Example
 Output ONLY the catalog. Use this exact pattern:
@@ -1123,7 +1230,7 @@ Information about the current repository:
 Working directory: {workdir}
 Operating system: {os}
 Documentation language: {lang}
-Documentation depth: {doc_depth}
+Documentation depth: {depth}
 Topic budget: {topic_budget}
 
 Repository structure (top levels):
@@ -1162,7 +1269,7 @@ def _split_path_list(raw: str) -> list[str]:
     return parts
 
 
-def parse_catalog(text: str) -> list[dict]:
+def parse_catalog(text: str, allowed_kinds: set[str] = TOPIC_KINDS) -> list[dict]:
     """Parse the v2 <section>/<group>/<topic> outline into an ordered page list."""
     pages: list[dict] = []
     section = group = ""
@@ -1177,7 +1284,7 @@ def parse_catalog(text: str) -> list[dict]:
             files = _split_path_list("\n".join(topic.get("evidenceFiles", [])))
             if not title:
                 raise ValueError("catalog topic is missing a title")
-            if kind not in TOPIC_KINDS:
+            if kind not in allowed_kinds:
                 raise ValueError(f"catalog topic {title!r} has invalid or missing kind")
             if not files:
                 raise ValueError(f"catalog topic {title!r} is missing evidence files")
@@ -1342,7 +1449,7 @@ PAGE_USER = """## CURRENT MISSION
 **Page kind**: {kind}
 **Audience**: {level} level developers
 **Documentation language**: {lang}
-**Documentation depth**: {doc_depth}
+**Documentation depth**: {depth}
 
 ## ENVIRONMENT
 Repository structure (top 2 levels):
@@ -1376,6 +1483,7 @@ Use these paths as primary evidence. You may inspect other files when needed to 
 - For `tradeoffs`: explain verified design choices, constraints, and consequences.
 - For `change-guide`: explain practical maintenance paths and risk areas.
 - For `reference`: provide compact orientation material that supports the other pages.
+{preset_page_guidance}
 
 ## OUTPUT FORMAT
 Wrap your FINAL complete documentation in <blog></blog> tags:
@@ -1458,9 +1566,10 @@ def assign_page_fields(pages: list[dict], repo: Path | None = None) -> list[dict
     return pages
 
 
-def _catalog_pages_from_raw(repo: Path, raw: str, topic_budget: int) -> tuple[list[dict], str]:
+def _catalog_pages_from_raw(repo: Path, raw: str, topic_budget: int,
+                            allowed_kinds: set[str] = TOPIC_KINDS) -> tuple[list[dict], str]:
     try:
-        pages = clean_catalog_pages(repo, parse_catalog(raw), topic_budget)
+        pages = clean_catalog_pages(repo, parse_catalog(raw, allowed_kinds), topic_budget)
     except ValueError as e:
         return [], str(e)
     defect = catalog_defect(pages)
@@ -1471,22 +1580,25 @@ def _catalog_pages_from_raw(repo: Path, raw: str, topic_budget: int) -> tuple[li
 
 def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
                   settings: LLMSettings, tree: str, profile: ProjectProfile) -> list[dict]:
-    topic_budget = topic_budget_for_depth(config.doc_depth, config.max_topics)
+    topic_budget = topic_budget_for_depth(config.depth, config.max_topics)
+    allowed_kinds, catalog_guidance, _ = preset_for(config.mode)
     ctx = {
         "workdir": str(repo),
         "os": sys.platform,
         "lang": lang_name(config.doc_lang),
-        "doc_depth": config.doc_depth,
+        "depth": config.depth,
         "topic_budget": topic_budget,
         "project_profile": profile_summary(profile),
         "tool_usage": tool_usage_description(config.enable_shell),
+        "kind_list": ", ".join(sorted(allowed_kinds)),
+        "preset_guidance": catalog_guidance,
     }
     messages = [
         {"role": "system", "content": CATALOG_SYSTEM.format(**ctx)},
         {"role": "user", "content": CATALOG_USER.format(tree=tree, **ctx)},
     ]
     catalog_raw = run_agent(client, repo, messages, "catalog", settings, config)
-    pages, defect = _catalog_pages_from_raw(repo, catalog_raw, topic_budget)
+    pages, defect = _catalog_pages_from_raw(repo, catalog_raw, topic_budget, allowed_kinds)
     if defect:
         messages.append({"role": "user", "content":
             "Your catalog was rejected: "
@@ -1496,7 +1608,7 @@ def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
         catalog_raw = client.chat.completions.create(model=settings.model, messages=messages
                                                      ).choices[0].message.content or ""
         messages.append({"role": "assistant", "content": catalog_raw})
-        pages, defect = _catalog_pages_from_raw(repo, catalog_raw, topic_budget)
+        pages, defect = _catalog_pages_from_raw(repo, catalog_raw, topic_budget, allowed_kinds)
     if defect:
         raise SystemExit("invalid v2 catalog: " + defect + "\n" + catalog_raw)
     return pages
@@ -1514,7 +1626,7 @@ def lang_name(doc_lang: str) -> str:
 
 
 def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
-                     started: datetime, doc_lang: str, doc_depth: str,
+                     started: datetime, doc_lang: str, depth: str,
                      profile: ProjectProfile, manifest: dict,
                      source_root: Path | None = None) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1524,7 +1636,7 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         "id": run_id,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "language": lang_code(doc_lang),
-        "doc_depth": doc_depth,
+        "depth": depth,
         "project_profile": asdict(profile),
         "source_root": str(source_root) if source_root else "",
         "pages": [
@@ -1606,12 +1718,14 @@ def wiki_is_incomplete(output_root: Path, pages: list[dict]) -> bool:
 
 def page_messages(repo: Path, config: RuntimeConfig, tree: str,
                   pages: list[dict], page: dict) -> list[dict]:
+    _, _, page_guidance = preset_for(config.mode)
     ctx = {
         "workdir": str(repo),
         "os": sys.platform,
         "lang": lang_name(config.doc_lang),
-        "doc_depth": config.doc_depth,
+        "depth": config.depth,
         "tool_usage": tool_usage_description(config.enable_shell),
+        "preset_page_guidance": page_guidance,
     }
     nav = render_nav(pages, page["index"] - 1)
     evidence = "\n".join(f"- {p}" for p in page.get("evidenceFiles", [])) or "- (catalog did not bind evidence paths)"
@@ -1729,7 +1843,7 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
     settings: LLMSettings | None = None
     if existing:
         pages, previous_manifest, meta = existing
-        config = replace(config, doc_depth=str(meta["doc_depth"]))
+        config = replace(config, depth=str(meta["depth"]))
         manifest_diff = diff_manifests(previous_manifest, current_manifest)
         print(f"[1/2] reusing catalog from {output_root}", flush=True)
         print(f"      {len(pages)} topics", flush=True)
@@ -1743,21 +1857,20 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
             raise SystemExit(f"no wiki output found under {output_root}; run without --page to create it")
         previous = load_wiki(output_root, strict=False)
         previous_pages = previous[0] if previous else []
-        config = replace(config, doc_depth=resolve_doc_depth(current_profile, config.doc_depth))
         settings = resolve_provider(config)
         client = make_client(settings)
         print(
             f"[1/2] building catalog for {repo} via {settings.provider}:{settings.model} @ {settings.base_url}",
             flush=True,
         )
-        print(f"      doc depth: {config.doc_depth}", flush=True)
+        print(f"      depth: {config.depth} · mode: {config.mode}", flush=True)
         pages = build_catalog(client, repo, config, settings, tree, current_profile)
         print(f"      {len(pages)} topics", flush=True)
 
         started = datetime.now(timezone.utc)
         run_id = started.astimezone().strftime("%Y-%m-%d-%H%M%S")
         write_wiki_index(output_root, pages, run_id, started, config.doc_lang,
-                         config.doc_depth, current_profile, current_manifest, source_root=repo)
+                         config.depth, current_profile, current_manifest, source_root=repo)
         cleanup_removed_pages(output_root, previous_pages, pages)
 
     force_pages = args.force or not existing

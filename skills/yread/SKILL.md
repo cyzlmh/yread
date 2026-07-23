@@ -75,7 +75,8 @@ yread config set DOC_LANG zh
 yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis"
 ```
 
-Useful keys:
+Useful keys (bare in the config file / `--env-file`; as a shell environment
+variable prefix with `YREAD_`, e.g. `YREAD_MODE=ml`):
 
 ```text
 PROVIDER=minimax-cn | deepseek | openai-compatible
@@ -83,7 +84,8 @@ BASE_URL=https://api.example.com/v1
 API_KEY=...
 MODEL=...
 DOC_LANG=zh | en
-DOC_DEPTH=auto | brief | standard | deep
+DEPTH=brief | standard | deep
+MODE=software | ml
 OUTPUT_DIR=/path/to/export/wiki
 MAX_STEPS=24
 MAX_TOPICS=30
