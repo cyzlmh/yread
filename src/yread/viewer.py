@@ -5,7 +5,7 @@
 wiki_dir defaults to ./.yread and must contain a v2 wiki.json plus Markdown
 pages under wiki/.
 
-Renders each page's markdown with mermaid diagrams, a flat page sidebar from
+Renders each page's markdown with mermaid diagrams, a section/group sidebar from
 wiki.json, and resolves the inter-page `[title](slug)` cross-links. Pass --repo
 to make `Sources: [file](path#Lx-Ly)` citations link to the real files (older
 wikis may still carry a `source_root` and resolve it automatically).
@@ -65,6 +65,8 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .wrap{{display:flex;min-height:100vh}}
  nav{{width:320px;flex:none;background:var(--side);border-right:1px solid var(--line);padding:18px 14px;overflow-y:auto;height:100vh;position:sticky;top:0;z-index:65}}
  nav h1{{font-size:14px;margin:4px 6px 14px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}}
+ nav .sec{{font-weight:700;margin:16px 6px 6px;font-size:13px;color:var(--fg)}}
+ nav .grp{{font-weight:600;margin:10px 6px 4px;font-size:12px;color:var(--muted)}}
  nav a{{display:block;padding:5px 8px;border-radius:6px;color:var(--fg);text-decoration:none;font-size:13.5px}}
  nav a:hover{{background:#eaeef2}} nav a.active{{background:#ddf4ff;color:var(--accent);font-weight:600}}
  nav .lv{{color:var(--muted);font-size:11px;margin-left:4px}}
@@ -190,11 +192,16 @@ def page_scripts(explain_enabled: bool) -> str:
 
 
 def build_nav(pages, active, on_home=False):
-    # Flat page list — one link per generated page, no section/group headers — so
-    # the sidebar mirrors the actual wiki/ markdown files.
     home_cls = " active" if on_home else ""
     out = ['<h1>Wiki</h1>', f'<a class="page{home_cls}" href="/">◈ Profile</a>']
+    last_sec, last_grp = None, None
     for p in pages:
+        if p.get("section") != last_sec:
+            last_sec = p.get("section"); last_grp = None
+            out.append(f'<div class="sec">{last_sec or ""}</div>')
+        grp = p.get("group")
+        if grp and grp != last_grp:
+            last_grp = grp; out.append(f'<div class="grp">{grp}</div>')
         cls = " active" if p["slug"] == active else ""
         meta = p.get("kind") or p.get("level", "")
         lv = f'<span class="lv">{meta}</span>' if meta else ""

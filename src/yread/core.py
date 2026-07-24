@@ -1226,11 +1226,15 @@ You CANNOT read binary weight files (.pth/.safetensors/.onnx/.om/...). Infer eac
 from its config.json, modeling code, and convert/export scripts — never from the
 weights. Model configs here are JSON (config.json), not YAML."""
 
-PAGE_ML_GUIDANCE = """- For `model-architecture`: document THIS ONE model. Cover what it is and its provenance
-  (base model / fine-tune), its structure (layers, hidden size, attention heads, parameter
-  scale), its input/output tensors, and its label taxonomy (id2label) if it is a classifier.
-  Read the family's config.json / preprocessor_config.json and its modeling code
-  (model.py / modeling_*.py); cite those, never the binary weights.
+PAGE_ML_GUIDANCE = """- For `model-architecture`: document THIS ONE model. For a consistent shape across model
+  pages, prefer this order, covering each part where the evidence supports it (skip a part
+  rather than padding): (1) one line on what the model is and its provenance (base model /
+  fine-tune); (2) a compact "structure at a glance" table — base model, layers, hidden size,
+  attention heads, parameter scale, precision; (3) one Mermaid diagram of the architecture;
+  (4) input / output tensors; (5) the label taxonomy (id2label) if it is a classifier; (6)
+  how the model is loaded and invoked. Read the family's config.json /
+  preprocessor_config.json and its modeling code (model.py / modeling_*.py); cite those,
+  never the binary weights.
 - For `data-pipeline`: trace raw input -> model-ready tensor per modality (preprocess, tokenize, feature-extract).
 - For `model-conversion`: explain the export / quantization / compilation chain and its target runtime / hardware, citing the convert/export scripts.
 - For `model-serving`: explain how the trained models are loaded and served for inference (engine, worker pools, app entry point).
@@ -1832,10 +1836,15 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         git = git_stats(source_root)
     summary = ["# Wiki\n"]
     summary.extend(_summary_profile_lines(meta, profile, code=code, git=git))
-    # A flat page list, one entry per generated page file — no section/group
-    # headers, so the index mirrors what actually exists under wiki/.
-    summary.append(f"\n## {'页面' if lang_code(doc_lang) == 'zh' else 'Pages'}\n")
+    summary.append("")
+    last_section = last_group = None
     for p in pages:
+        if p["section"] != last_section:
+            summary.append(f"\n## {p['section']}\n")
+            last_section, last_group = p["section"], None
+        if p.get("group") and p["group"] != last_group:
+            summary.append(f"\n**{p['group']}**\n")
+            last_group = p["group"]
         summary.append(f"- [{p['title']}]({p['file']}) `{p.get('kind', '')}` `{p.get('level', '')}`")
     (output_root / "SUMMARY.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     write_manifest(output_root, manifest)
