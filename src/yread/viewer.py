@@ -23,25 +23,38 @@ import markdown
 
 SENSITIVE_SOURCE_NAMES = {".env", ".env.local", ".npmrc", ".pypirc", ".netrc", "auth.json", "credentials.json"}
 
-# Select-to-explain: a reader selects jargon (ViT, M-RoPE, ...) and gets a short
-# generic explanation from the LLM configured in ~/.yread/config.env. Kept simple
-# on purpose — the term alone, no repo context, one shot, cached per term.
+# Select-to-explain / ask: a reader selects text (a term like ViT, or a whole
+# passage) and either gets a short generic explanation or asks a custom question
+# about the selection, answered by the LLM configured in ~/.yread/config.env.
 LANG_NAMES = {"zh": "Chinese", "en": "English"}
+MAX_SELECTION = 2000  # chars — a term or a paragraph, but not a whole page
 EXPLAIN_SYSTEM = (
     "You explain a technical term for a developer reading project documentation. "
     "Given the term, give a concise 2-4 sentence explanation of what it is and why it "
     "matters. Answer in {lang}. Plain prose; inline code for names/APIs is fine. Do "
     "not ask questions, add a preamble, or restate the term as a heading."
 )
+ASK_SYSTEM = (
+    "You answer a developer's question about a selected passage from project "
+    "documentation. Be concise and concrete, grounded in the selected text. Answer "
+    "in {lang}. Plain prose; inline code for names/APIs is fine. Do not add a preamble."
+)
 
 
-def generate_explanation(client, model: str, lang: str, term: str) -> str:
-    """Ask the configured LLM for a short, generic explanation of ``term`` and
-    return it as rendered HTML."""
-    messages = [
-        {"role": "system", "content": EXPLAIN_SYSTEM.format(lang=LANG_NAMES.get(lang, lang or "English"))},
-        {"role": "user", "content": term},
-    ]
+def generate_explanation(client, model: str, lang: str, term: str, question: str = "") -> str:
+    """Explain ``term`` (when ``question`` is empty) or answer ``question`` about the
+    selected ``term`` text. Returns rendered HTML."""
+    lang_name = LANG_NAMES.get(lang, lang or "English")
+    if question:
+        messages = [
+            {"role": "system", "content": ASK_SYSTEM.format(lang=lang_name)},
+            {"role": "user", "content": f'Selected text:\n"""\n{term}\n"""\n\nQuestion: {question}'},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": EXPLAIN_SYSTEM.format(lang=lang_name)},
+            {"role": "user", "content": term},
+        ]
     resp = client.chat.completions.create(model=model, messages=messages)
     text = (resp.choices[0].message.content or "").strip()
     return markdown.markdown(text, extensions=["fenced_code"])
@@ -82,9 +95,14 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
  #yr-ebtn{{position:absolute;z-index:60;display:none;padding:3px 11px;font:12.5px/1.4 inherit;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)}}
- #yr-ebub{{position:absolute;z-index:61;display:none;max-width:340px;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 30px 12px 14px;font-size:13.5px;line-height:1.6}}
- #yr-ebub h4{{margin:0 0 6px;font-size:12.5px;color:var(--muted);font-weight:600}}
- #yr-ebub .yr-body p{{margin:.35em 0}} #yr-ebub .yr-body code{{font-size:85%}}
+ #yr-ebub{{position:absolute;z-index:61;display:none;width:360px;max-width:92vw;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13.5px;line-height:1.6}}
+ #yr-ebub .yr-ctx{{font-size:12px;color:var(--muted);background:var(--side);border-radius:6px;padding:5px 22px 5px 8px;margin:0 0 8px;max-height:52px;overflow:auto}}
+ #yr-ebub .yr-body{{max-height:300px;overflow:auto}}
+ #yr-ebub .yr-q{{font-weight:600;font-size:12.5px;margin:8px 0 2px}}
+ #yr-ebub .yr-a p{{margin:.35em 0}} #yr-ebub .yr-a code{{font-size:85%}}
+ #yr-ebub .yr-ask{{display:flex;gap:6px;margin-top:10px}}
+ #yr-ebub .yr-ask input{{flex:1;min-width:0;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:12.5px;background:var(--bg);color:var(--fg)}}
+ #yr-ebub .yr-ask button{{border:none;background:var(--accent);color:#fff;border-radius:6px;padding:0 11px;cursor:pointer;font-size:14px}}
  #yr-ebub .yr-x{{position:absolute;top:5px;right:9px;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}}
  #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
  #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:64}}
@@ -115,7 +133,7 @@ EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
   function trySelect(){
     setTimeout(function(){
       var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
-      if(!t||t.length>200||!sel.rangeCount){hideBtn();return;}
+      if(!t||t.length>2000||!sel.rangeCount){hideBtn();return;}
       var r=sel.getRangeAt(0).getBoundingClientRect();
       if(!r.width&&!r.height){hideBtn();return;}
       term=t; place(btn,r); btn.style.display='block';
@@ -135,17 +153,31 @@ EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
   document.addEventListener('mousedown',dismiss);
   document.addEventListener('touchstart',dismiss);
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){hideBtn();hideBub();}});
+  function ask(question){
+    var body=bub.querySelector('.yr-body');
+    var turn=document.createElement('div'); turn.className='yr-turn';
+    turn.innerHTML=(question?'<div class="yr-q">'+esc(question)+'</div>':'')+'<div class="yr-a">…</div>';
+    body.appendChild(turn); body.scrollTop=body.scrollHeight;
+    var a=turn.querySelector('.yr-a');
+    fetch('/explain',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({term:term,question:question||''})})
+      .then(function(res){return res.json();})
+      .then(function(d){a.innerHTML=d.html||esc(d.error||'（无结果）'); body.scrollTop=body.scrollHeight;})
+      .catch(function(err){a.textContent='请求失败：'+err;});
+  }
   btn.addEventListener('click',function(){
     var sel=window.getSelection();
     var r=(sel&&sel.rangeCount)?sel.getRangeAt(0).getBoundingClientRect():btn.getBoundingClientRect();
-    bub.innerHTML='<span class="yr-x">×</span><h4>'+esc(term)+'</h4><div class="yr-body">…</div>';
+    var head=term.length>140?term.slice(0,140)+'…':term;
+    bub.innerHTML='<span class="yr-x">×</span><div class="yr-ctx">'+esc(head)+'</div>'
+      +'<div class="yr-body"></div>'
+      +'<form class="yr-ask"><input placeholder="追问这段…（Enter 发送）" maxlength="500"><button type="submit">→</button></form>';
     place(bub,r); bub.style.display='block'; hideBtn();
     bub.querySelector('.yr-x').onclick=hideBub;
-    var body=bub.querySelector('.yr-body');
-    fetch('/explain',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({term:term})})
-      .then(function(res){return res.json();})
-      .then(function(d){body.innerHTML=d.html||esc(d.error||'（无结果）');})
-      .catch(function(err){body.textContent='请求失败：'+err;});
+    var form=bub.querySelector('.yr-ask'), inp=form.querySelector('input');
+    form.addEventListener('submit',function(e){e.preventDefault(); var q=inp.value.trim(); if(!q)return; inp.value=''; ask(q);});
+    ask('');            // initial generic explanation
+    setTimeout(function(){inp.focus();},0);
   });
 })();
 </script>"""
@@ -283,19 +315,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "未配置模型（~/.yread/config.env）"})
         length = int(self.headers.get("Content-Length", "0") or 0)
         try:
-            term = (json.loads(self.rfile.read(length) or b"{}").get("term") or "").strip()
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            term = (payload.get("term") or "").strip()
+            question = (payload.get("question") or "").strip()[:500]
         except (ValueError, OSError):
-            term = ""
-        if not term or len(term) > 200:
+            term, question = "", ""
+        if not term or len(term) > MAX_SELECTION:
             return self._send_json({"error": "无效选区"})
-        cached = self.explain_cache.get(term.lower())
+        key = f"{question}\n##\n{term}".lower()
+        cached = self.explain_cache.get(key)
         if cached is not None:
             return self._send_json({"html": cached})
         try:
-            html = generate_explanation(self.client, self.settings.model, self.lang, term)
+            html = generate_explanation(self.client, self.settings.model, self.lang, term, question)
         except Exception as e:  # noqa: BLE001 — surface the failure to the bubble, don't crash the server
             return self._send_json({"error": f"生成失败：{e}"})
-        self.explain_cache[term.lower()] = html
+        self.explain_cache[key] = html
         self._send_json({"html": html})
 
     def do_GET(self):

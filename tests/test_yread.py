@@ -856,6 +856,22 @@ def test_generate_explanation_renders_markdown() -> None:
     assert captured["messages"][1]["content"] == "ViT"
 
 
+def test_generate_explanation_with_question_grounds_in_selection() -> None:
+    from types import SimpleNamespace
+
+    captured: dict = {}
+
+    def create(model, messages):
+        captured["messages"] = messages
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ans"))])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    viewer.generate_explanation(client, "m1", "zh", "a selected passage", "这段在讲什么?")
+    sys_msg, user_msg = captured["messages"][0]["content"], captured["messages"][1]["content"]
+    assert "question" in sys_msg.lower()  # ASK_SYSTEM path, not the term-explain path
+    assert "a selected passage" in user_msg and "这段在讲什么?" in user_msg
+
+
 def test_build_profile_html_renders_from_meta() -> None:
     meta = {
         "generated_at": "2026-07-24T04:18:15Z", "id": "run1", "mode": "ml",
