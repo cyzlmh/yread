@@ -849,6 +849,26 @@ def test_generate_explanation_renders_markdown() -> None:
     assert captured["messages"][1]["content"] == "ViT"
 
 
+def test_build_profile_html_renders_from_meta() -> None:
+    meta = {
+        "generated_at": "2026-07-24T04:18:15Z", "id": "run1", "mode": "ml",
+        "depth": "brief", "language": "zh", "source_root": "/repo",
+        "project_profile": {
+            "total_files": 3, "source_files": 1, "primary_languages": ["Python"],
+            "max_depth": 2, "has_readme": True, "has_tests": False, "has_ci": False,
+            "package_files": [], "entry_points": [], "model_files": 1,
+            "config_files": 1, "data_files": 0,
+            "models": [{"name": "qwen3-vl", "dir": "models/qwen3-vl",
+                        "arch": "Qwen3VLForConditionalGeneration",
+                        "formats": [".safetensors"], "config": "x/config.json"}],
+        },
+    }
+    html = viewer.build_profile_html(meta, None, "myrepo")  # repo=None -> no loc/git rows
+    assert "<h1>myrepo · Profile</h1>" in html
+    assert "<table>" in html and "Generated" in html
+    assert "qwen3-vl" in html and "Qwen3VLForConditionalGeneration" in html
+
+
 def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
     """GET / redirects to the first page even when its slug is CJK — the redirect
     target must be percent-encoded (HTTP headers are latin-1) and /p/ must decode."""
@@ -870,6 +890,7 @@ def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
     viewer.Handler.client = None
     viewer.Handler.lang = "zh"
     viewer.Handler.explain_cache = {}
+    viewer.Handler.home_body = None  # no profile home -> / falls back to the first page
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), viewer.Handler)
     port = srv.server_address[1]

@@ -117,17 +117,28 @@ EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
   function hideBtn(){btn.style.display='none';}
   function hideBub(){bub.style.display='none';}
   function place(el,r){el.style.left=(window.scrollX+r.left)+'px';el.style.top=(window.scrollY+r.bottom+6)+'px';}
-  main.addEventListener('mouseup',function(){
+  function trySelect(){
     setTimeout(function(){
       var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
       if(!t||t.length>200||!sel.rangeCount){hideBtn();return;}
-      term=t; place(btn,sel.getRangeAt(0).getBoundingClientRect()); btn.style.display='block';
+      var r=sel.getRangeAt(0).getBoundingClientRect();
+      if(!r.width&&!r.height){hideBtn();return;}
+      term=t; place(btn,r); btn.style.display='block';
     },10);
-  });
-  document.addEventListener('mousedown',function(e){
+  }
+  main.addEventListener('mouseup',trySelect);       // desktop
+  main.addEventListener('touchend',trySelect);      // mobile: tap-drag select
+  var selTimer=null;                                // mobile: handle bars often fire only selectionchange
+  document.addEventListener('selectionchange',function(){clearTimeout(selTimer);selTimer=setTimeout(trySelect,300);});
+  function dismiss(e){
+    var hasSel=((window.getSelection()||'')+'').trim().length>0;
     if(e.target!==btn&&!bub.contains(e.target)) hideBub();
-    if(e.target!==btn) hideBtn();
-  });
+    // keep the button while a selection is live so the synthesized post-touch
+    // mousedown doesn't hide what the user just selected
+    if(e.target!==btn&&!hasSel) hideBtn();
+  }
+  document.addEventListener('mousedown',dismiss);
+  document.addEventListener('touchstart',dismiss);
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){hideBtn();hideBub();}});
   btn.addEventListener('click',function(){
     var sel=window.getSelection();
@@ -151,8 +162,10 @@ def explain_assets(enabled: bool) -> str:
     return EXPLAIN_ASSETS.replace("__ENABLED__", "true" if enabled else "false")
 
 
-def build_nav(pages, active):
-    out, last_sec, last_grp = ['<h1>Wiki</h1>'], None, None
+def build_nav(pages, active, on_home=False):
+    home_cls = " active" if on_home else ""
+    out = ['<h1>Wiki</h1>', f'<a class="page{home_cls}" href="/">◈ Profile</a>']
+    last_sec, last_grp = None, None
     for p in pages:
         if p.get("section") != last_sec:
             last_sec = p.get("section"); last_grp = None
@@ -199,9 +212,30 @@ def safe_source_path(repo: Path, rel: str) -> Path | None:
     return f if f.is_file() else None
 
 
+def build_profile_html(meta: dict, repo: Path | None, name: str) -> str | None:
+    """Render the wiki's project profile + run metadata as HTML for the home view,
+    reusing the exact SUMMARY.md formatter (loc/git included when the source repo
+    is available). Returns None if the stored profile can't be reconstructed."""
+    import dataclasses
+
+    from . import core
+    pf = meta.get("project_profile") or {}
+    try:
+        fields = {f.name for f in dataclasses.fields(core.ProjectProfile)}
+        profile = core.ProjectProfile(**{k: v for k, v in pf.items() if k in fields})
+    except (TypeError, ValueError):
+        return None
+    code = core.code_stats(repo) if repo and repo.is_dir() else None
+    git = core.git_stats(repo) if repo and repo.is_dir() else None
+    md = "\n".join(core._summary_profile_lines(meta, profile, code=code, git=git))
+    html = markdown.markdown(md, extensions=["fenced_code", "tables", "sane_lists"])
+    return f"<h1>{name} · Profile</h1>\n{html}"
+
+
 class Handler(BaseHTTPRequestHandler):
     wiki: Path; pages: list; byslug: dict; repo: Path | None
     settings = None; client = None; lang = "en"; explain_cache: dict = {}
+    home_body = None; home_title = "Wiki"
 
     def log_message(self, *a): pass
 
@@ -238,8 +272,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/":
-            # Slugs keep CJK/Unicode; HTTP headers are latin-1, so the redirect
-            # target must be percent-encoded or send_header raises.
+            if self.home_body is not None:
+                html = PAGE.format(title=self.home_title,
+                                   nav=build_nav(self.pages, None, on_home=True),
+                                   body=self.home_body,
+                                   scripts=explain_assets(bool(self.settings and self.client)))
+                return self._send(html.encode())
+            # No reconstructable profile: fall back to the first page. Slugs keep
+            # CJK/Unicode; HTTP headers are latin-1, so the target must be encoded.
             self.send_response(302)
             self.send_header("Location", "/p/" + quote(self.pages[0]["slug"]))
             self.end_headers(); return
@@ -281,11 +321,14 @@ def main(argv: list[str] | None = None, settings=None):
         if recorded.is_dir():
             repo = recorded.resolve()
     pages = meta["pages"]
+    name = Path(meta.get("source_root") or "").name or wiki.name or "Wiki"
     Handler.wiki, Handler.pages = wiki, pages
     Handler.byslug = {p["slug"]: p for p in pages}
     Handler.repo = repo
     Handler.lang = meta.get("language", "en")
     Handler.explain_cache = {}
+    Handler.home_title = f"{name} · Profile"
+    Handler.home_body = build_profile_html(meta, repo, name)
     Handler.settings = settings
     if settings:
         from openai import OpenAI
