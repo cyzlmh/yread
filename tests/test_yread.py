@@ -830,6 +830,13 @@ def test_explain_assets_reflects_enabled_flag() -> None:
     assert "yr-ebtn" in page and "<title>T · yread</title>" in page
 
 
+def test_page_scripts_and_sidebar_toggle() -> None:
+    # The sidebar drawer toggle is always present; the explain layer is gated.
+    js = viewer.page_scripts(False)
+    assert "sb-open" in js and "if(!false)" in js
+    assert 'id="yr-menu"' in viewer.PAGE and "@media (max-width:800px)" in viewer.PAGE
+
+
 def test_generate_explanation_renders_markdown() -> None:
     from types import SimpleNamespace
 

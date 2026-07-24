@@ -82,14 +82,14 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  :root{{--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--accent:#0969da;--bg:#fff;--side:#f6f8fa}}
  *{{box-sizing:border-box}} body{{margin:0;font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:var(--bg)}}
  .wrap{{display:flex;min-height:100vh}}
- nav{{width:320px;flex:none;background:var(--side);border-right:1px solid var(--line);padding:18px 14px;overflow-y:auto;height:100vh;position:sticky;top:0}}
+ nav{{width:320px;flex:none;background:var(--side);border-right:1px solid var(--line);padding:18px 14px;overflow-y:auto;height:100vh;position:sticky;top:0;z-index:65}}
  nav h1{{font-size:14px;margin:4px 6px 14px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}}
  nav .sec{{font-weight:700;margin:16px 6px 6px;font-size:13px;color:var(--fg)}}
  nav .grp{{font-weight:600;margin:10px 6px 4px;font-size:12px;color:var(--muted)}}
  nav a{{display:block;padding:5px 8px;border-radius:6px;color:var(--fg);text-decoration:none;font-size:13.5px}}
  nav a:hover{{background:#eaeef2}} nav a.active{{background:#ddf4ff;color:var(--accent);font-weight:600}}
  nav .lv{{color:var(--muted);font-size:11px;margin-left:4px}}
- main{{flex:1;max-width:900px;padding:36px 48px;overflow-x:auto}}
+ main{{flex:1;min-width:0;max-width:900px;padding:36px 48px;overflow-x:auto}}
  main a{{color:var(--accent);text-decoration:none}} main a:hover{{text-decoration:underline}}
  pre{{background:var(--side);padding:14px;border-radius:8px;overflow-x:auto;font-size:13.5px}}
  code{{background:rgba(175,184,193,.2);padding:.15em .3em;border-radius:4px;font-size:85%}}
@@ -104,7 +104,16 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  #yr-ebub h4{{margin:0 0 6px;font-size:12.5px;color:var(--muted);font-weight:600}}
  #yr-ebub .yr-body p{{margin:.35em 0}} #yr-ebub .yr-body code{{font-size:85%}}
  #yr-ebub .yr-x{{position:absolute;top:5px;right:9px;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}}
-</style></head><body><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
+ #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
+ #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:64}}
+ @media (max-width:800px){{
+   nav{{position:fixed;left:0;top:0;height:100vh;transform:translateX(-100%);transition:transform .22s ease;box-shadow:2px 0 16px rgba(0,0,0,.15)}}
+   body.sb-open nav{{transform:translateX(0)}}
+   body.sb-open #yr-backdrop{{display:block}}
+   #yr-menu{{display:flex}}
+   main{{padding:64px 20px 40px;max-width:100%}}
+ }}
+</style></head><body><button id="yr-menu" aria-label="目录">☰</button><div id="yr-backdrop"></div><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
 
 
 EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
@@ -160,6 +169,26 @@ def explain_assets(enabled: bool) -> str:
     """The select-to-explain button/bubble markup + JS, with the feature flag
     baked in. When disabled the script returns early and no requests are made."""
     return EXPLAIN_ASSETS.replace("__ENABLED__", "true" if enabled else "false")
+
+
+# Sidebar drawer toggle. Always runs (independent of select-to-explain) so the
+# hamburger works on mobile even when no LLM is configured.
+LAYOUT_JS = """<script>
+(function(){
+  var m=document.getElementById('yr-menu'), b=document.getElementById('yr-backdrop'), nav=document.querySelector('nav');
+  if(!m) return;
+  function toggle(){document.body.classList.toggle('sb-open');}
+  m.addEventListener('click',toggle);
+  if(b) b.addEventListener('click',toggle);
+  if(nav) nav.addEventListener('click',function(e){if(e.target.tagName==='A') document.body.classList.remove('sb-open');});
+})();
+</script>"""
+
+
+def page_scripts(explain_enabled: bool) -> str:
+    """All page-level scripts: the always-on sidebar toggle plus the optional
+    select-to-explain layer."""
+    return LAYOUT_JS + explain_assets(explain_enabled)
 
 
 def build_nav(pages, active, on_home=False):
@@ -276,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
                 html = PAGE.format(title=self.home_title,
                                    nav=build_nav(self.pages, None, on_home=True),
                                    body=self.home_body,
-                                   scripts=explain_assets(bool(self.settings and self.client)))
+                                   scripts=page_scripts(bool(self.settings and self.client)))
                 return self._send(html.encode())
             # No reconstructable profile: fall back to the first page. Slugs keep
             # CJK/Unicode; HTTP headers are latin-1, so the target must be encoded.
@@ -298,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             html = PAGE.format(title=p["title"],
                                nav=build_nav(self.pages, slug),
                                body=render_body(md_text, slugs, self.repo),
-                               scripts=explain_assets(bool(self.settings and self.client)))
+                               scripts=page_scripts(bool(self.settings and self.client)))
             return self._send(html.encode())
         self._send(b"not found", code=404)
 
