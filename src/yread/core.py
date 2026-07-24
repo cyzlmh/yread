@@ -1789,8 +1789,8 @@ def _summary_profile_lines(meta: dict, profile: ProjectProfile,
         if git.get("dirty"):
             gparts.append("dirty")
         rows.append(("Git", " · ".join(gparts)))
-    if meta.get("source_root"):
-        rows.append(("Source", str(meta["source_root"])))
+    # NB: the absolute source path is deliberately NOT shown — SUMMARY.md and the
+    # rendered profile can be shared, and a local path leaks the username/layout.
 
     lines: list[str] = []
     if meta_bits:
