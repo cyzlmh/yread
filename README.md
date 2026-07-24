@@ -123,20 +123,34 @@ training recipes, and model artifacts, which a pure architecture view under-weig
 auto-detection:
 
 - `software` (default) — the standard architecture-first lens.
-- `ml` — treats configs, training recipes, and shell scripts as primary evidence,
-  and unlocks extra topic kinds: `model-architecture`, `training`, `data-pipeline`,
-  `evaluation`, `model-conversion`, and `model-serving`. Binary weights are not read
-  as text — the agent is told to infer the model inventory from configs and
-  export/convert scripts instead.
+- `ml` — **model-first**. The profile detects the repo's model families (grouping
+  weights and their `config.json` under each model directory), and the catalog plans
+  **one page per model** — its architecture, provenance, input/output tensors, and
+  label taxonomy (`id2label`) — with the serving/conversion code as supporting pages,
+  not the headline. It unlocks the topic kinds `model-architecture`, `data-pipeline`,
+  `model-conversion`, `model-serving`, `training`, and `evaluation`. Binary weights are
+  never read as text — the agent infers each model from its `config.json`, modeling
+  code, and export/convert scripts. Generic software pages are demoted to at most one.
 
 ```bash
 yread config set MODE ml        # switch to the ML lens
 yread generate /path/to/repo --mode ml   # or per run
 ```
 
-To decide which mode a repo needs, run `yread profile`: an `Assets` section
-surfaces model weights and datasets — the files a source-line count ignores — with
-counts and sizes. If it lists weights, reach for `--mode ml`.
+To decide which mode a repo needs, run `yread profile`. An `Assets` section surfaces
+model weights and datasets — the files a source-line count ignores — and, when it finds
+them, a `Models` section names each detected model family and its architecture:
+
+```text
+Assets
+  weights     9 files · 2.9 GB   .om×4 .onnx×4 .pth×1
+  ...
+Models
+  audio_model     ASTForAudioClassification    .om .onnx .pth
+  image_model     ?                            .om .onnx
+```
+
+If it lists models, reach for `--mode ml`.
 
 ## Provider Configuration
 

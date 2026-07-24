@@ -214,12 +214,37 @@ def test_wiki_index_records_source_root(tmp_path: Path) -> None:
     meta = json.loads((output_root / "wiki.json").read_text())
     assert meta["schema_version"] == 2
     assert meta["depth"] == "brief"
+    assert meta["mode"] == "software"
     assert meta["project_profile"]["has_readme"] is True
     assert meta["source_root"] == str(tmp_path / "repo")
     assert meta["pages"][0]["file"] == "wiki/a.md"
     assert meta["pages"][0]["kind"] == "overview"
     assert meta["pages"][0]["evidenceFiles"] == ["README.md"]
-    assert (output_root / "SUMMARY.md").read_text().count("(wiki/a.md)") == 1
+    summary = (output_root / "SUMMARY.md").read_text()
+    assert summary.count("(wiki/a.md)") == 1
+    # A profile overview line precedes the page list, but no Models table when empty.
+    assert "> 0 source · 1 files" in summary
+    assert "**Models**" not in summary
+
+
+def test_summary_includes_model_inventory(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    output_root = tmp_path / ".yread"
+    pages = [{"slug": "a", "file": "wiki/a.md", "title": "A", "section": "S",
+              "kind": "overview", "level": "Beginner", "evidenceFiles": ["README.md"]}]
+    profile = yread.ProjectProfile(
+        total_files=3, source_files=1, primary_languages=["Python"], max_depth=2,
+        has_readme=True, has_tests=False, has_ci=False, package_files=[], entry_points=[],
+        models=[{"name": "qwen3-vl", "dir": "models/qwen3-vl",
+                 "arch": "Qwen3VLForConditionalGeneration",
+                 "formats": [".safetensors"], "config": "models/qwen3-vl/config.json"}],
+    )
+    yread.write_wiki_index(output_root, pages, "run1", datetime.now(timezone.utc),
+                           "zh", "brief", profile, {}, source_root=tmp_path / "repo", mode="ml")
+    summary = (output_root / "SUMMARY.md").read_text()
+    assert "**Models**" in summary
+    assert "| qwen3-vl | Qwen3VLForConditionalGeneration | .safetensors |" in summary
 
 
 def test_cli_requires_explicit_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
@@ -779,9 +804,91 @@ def test_preset_for_ml_unlocks_kinds() -> None:
     assert "model-architecture" in allowed and "training" in allowed
     assert "overview" in allowed  # base kinds still valid
     assert catalog_guidance and page_guidance
+    # The ml lens must steer model-first, one page per model — not append optional kinds.
+    assert "PER model family" in catalog_guidance
+    assert "OVERRIDES" in catalog_guidance
     base_allowed, base_cat, base_page = yread.preset_for("software")
     assert "model-architecture" not in base_allowed
     assert base_cat == "" and base_page == ""
+
+
+def test_classify_asset_recognizes_json_model_config(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"architectures": ["ASTForAudioClassification"]}\n')
+    assert yread.classify_asset(cfg) == "configs"
+    assert yread.classify_asset(tmp_path / "fusion_result.json") is None  # not a model config
+    assert yread.classify_asset(tmp_path / "m.onnx") == "weights"
+
+
+def test_detect_model_families_groups_by_model_dir(tmp_path: Path) -> None:
+    audio = tmp_path / "models" / "audio_model"
+    (audio / "audio_classification").mkdir(parents=True)
+    (audio / "ast_model.om").write_bytes(b"\x00")
+    (audio / "ast_model.onnx").write_bytes(b"\x00")
+    (audio / "audio_classification" / "config.json").write_text(
+        '{"architectures": ["ASTForAudioClassification"], "hidden_size": 768}\n')
+    text = tmp_path / "models" / "text_model"
+    text.mkdir(parents=True)
+    (text / "bert_model.om").write_bytes(b"\x00")
+    # a lone non-model config.json must NOT register as a model family
+    (tmp_path / "app_config").mkdir()
+    (tmp_path / "app_config" / "config.json").write_text('{"port": 8000}\n')
+
+    fams = {f["name"]: f for f in yread.detect_model_families(tmp_path)}
+    assert set(fams) == {"audio_model", "text_model"}
+    assert fams["audio_model"]["arch"] == "ASTForAudioClassification"
+    # weights in the family dir group with the config in a sibling subfolder
+    assert fams["audio_model"]["formats"] == [".om", ".onnx"]
+    assert fams["audio_model"]["config"] == "models/audio_model/audio_classification/config.json"
+    assert fams["text_model"]["formats"] == [".om"]
+
+
+def test_detect_model_families_drops_training_scratch(tmp_path: Path) -> None:
+    # Real base models, each with its own config.json + weights.
+    for name, arch in [("Qwen3-VL-2B-Instruct", "Qwen3VLForConditionalGeneration"),
+                       ("single_model_sonar", "XLMRobertaForSequenceClassification")]:
+        d = tmp_path / "multimodal_model" / name if "Qwen" in name else tmp_path / name
+        d.mkdir(parents=True)
+        (d / "model.safetensors").write_bytes(b"\x00")
+        (d / "config.json").write_text(f'{{"architectures": ["{arch}"]}}\n')
+    # Training scratch that must NOT become its own model page:
+    ckpt = tmp_path / "single_model_sonar" / "checkpoints" / "checkpoint-1054"
+    ckpt.mkdir(parents=True)
+    (ckpt / "pytorch_model.bin").write_bytes(b"\x00")
+    lora = tmp_path / "multimodal_model" / "outputs_12_52_lora_ddp2"
+    lora.mkdir(parents=True)
+    (lora / "adapter_model.safetensors").write_bytes(b"\x00")
+
+    names = [f["name"] for f in yread.detect_model_families(tmp_path)]
+    assert names == ["Qwen3-VL-2B-Instruct", "single_model_sonar"]
+    assert not any("checkpoint" in n or "lora" in n or "outputs" in n for n in names)
+
+
+def test_build_profile_surfaces_model_families(tmp_path: Path) -> None:
+    m = tmp_path / "models" / "vit"
+    m.mkdir(parents=True)
+    (m / "vit_model.onnx").write_bytes(b"\x00")
+    (m / "config.json").write_text('{"model_type": "vit"}\n')
+    profile = yread.build_project_profile(tmp_path)
+    assert [f["name"] for f in profile.models] == ["vit"]
+    assert profile.models[0]["arch"] == "vit"
+
+
+def test_clean_catalog_pages_keeps_ml_kinds_when_allowed(tmp_path: Path) -> None:
+    # Regression: clean_catalog_pages must honor the same allowed_kinds as the
+    # parser, or every ml page (model-architecture, ...) is silently dropped and
+    # only `overview` survives.
+    (tmp_path / "model.py").write_text("x = 1\n")
+    pages = [
+        {"kind": "overview", "title": "Overview", "evidenceFiles": ["model.py"]},
+        {"kind": "model-architecture", "title": "AST Model", "evidenceFiles": ["model.py"]},
+        {"kind": "model-serving", "title": "Serving", "evidenceFiles": ["model.py"]},
+    ]
+    base = yread.clean_catalog_pages(tmp_path, pages, topic_budget=10)
+    assert [p["kind"] for p in base] == ["overview"]  # ml kinds rejected by default
+    ml = yread.clean_catalog_pages(tmp_path, pages, topic_budget=10,
+                                   allowed_kinds=yread.TOPIC_KINDS | yread.ML_TOPIC_KINDS)
+    assert [p["kind"] for p in ml] == ["overview", "model-architecture", "model-serving"]
 
 
 def test_parse_catalog_ml_kind_requires_allowed_kinds() -> None:

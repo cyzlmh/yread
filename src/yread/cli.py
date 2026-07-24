@@ -218,6 +218,17 @@ def _run_profile(args: argparse.Namespace) -> int:
             size = f" · {_human_bytes(entry['bytes'])}" if entry["bytes"] else ""
             print(f"  {bucket:<9}{entry['files']:>4} {plural}{size}   {exts}")
 
+    # Name the model families a source-line count can't see. When this lists
+    # models, reach for `--mode ml` to document them one page each.
+    if profile.models:
+        print()
+        print("Models")
+        for m in profile.models:
+            arch = m["arch"] or "?"
+            fmts = " ".join(m["formats"]) if m["formats"] else ""
+            name = m["name"] if len(m["name"]) <= 24 else m["name"][:23] + "…"
+            print(f"  {name:<26}{arch:<40} {fmts}".rstrip())
+
     stats = core.git_stats(repo)
     gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))
     if stats or gh:

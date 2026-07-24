@@ -48,7 +48,7 @@ import sys
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -143,6 +143,17 @@ DATASET_EXTS = {
     ".mp4", ".avi", ".mov", ".mkv",
     ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".npy",
 }
+# Model configs are JSON here, not YAML — HuggingFace and friends describe the whole
+# architecture (layers, hidden size, id2label taxonomy) in these files, so an
+# extension check alone would miss the single richest piece of model evidence.
+MODEL_CONFIG_NAMES = {
+    "config.json", "preprocessor_config.json", "tokenizer_config.json",
+    "generation_config.json", "feature_extractor_config.json",
+}
+# Directory names that commonly hold model families. The path segment right after one
+# of these is treated as a model family name, so weights and their configs that live in
+# sibling subfolders still group under the same model.
+MODEL_DIR_HINTS = {"models", "model", "checkpoints", "ckpt", "ckpts", "weights"}
 
 WIKI_PAGE_DIR = "wiki"
 
@@ -186,6 +197,7 @@ class ProjectProfile:
     model_files: int = 0
     config_files: int = 0
     data_files: int = 0
+    models: list[dict] = field(default_factory=list)
 
 
 def load_pi_provider(name: str) -> tuple[str, str]:
@@ -498,17 +510,93 @@ def _is_test_path(rel: str) -> bool:
     )
 
 
-def classify_asset(ext: str) -> str | None:
-    """Bucket a non-code file by extension: weights, configs, or data. Returns
-    None for anything that is not an ML/model asset."""
-    ext = ext.lower()
+def classify_asset(path: Path) -> str | None:
+    """Bucket a non-code file: weights, configs, or data. Returns None for
+    anything that is not an ML/model asset. Configs are matched by extension
+    (.yaml/.yml) OR by name (config.json and friends), because model configs are
+    JSON here and carry the architecture, not just tuning knobs."""
+    ext = path.suffix.lower()
     if ext in MODEL_WEIGHT_EXTS:
         return "weights"
-    if ext in {".yaml", ".yml"}:
+    if ext in {".yaml", ".yml"} or path.name.lower() in MODEL_CONFIG_NAMES:
         return "configs"
     if ext in DATASET_EXTS:
         return "data"
     return None
+
+
+def _read_arch_name(path: Path) -> str | None:
+    """Best-effort read of the architecture name from a model config.json — the
+    single most useful anchor for planning a per-model page. Small files only."""
+    try:
+        if path.stat().st_size > 200_000:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    arch = data.get("architectures")
+    if isinstance(arch, list) and arch:
+        return str(arch[0])
+    if isinstance(data.get("model_type"), str):
+        return data["model_type"]
+    return None
+
+
+# Training scratch, not distinct models: step checkpoints and fine-tune output dirs.
+# Documenting each of these as its own model page is noise — the base model and the
+# training/conversion pages already account for them.
+_CHECKPOINT_RE = re.compile(r"^(checkpoint|ckpt|step|epoch|global[-_]?step)[-_]?\d+$", re.I)
+_SCRATCH_NAME_RE = re.compile(r"(^|[-_])(lora|outputs?|runs?|wandb|stage\d+)([-_]|$)", re.I)
+_SCRATCH_ANCESTORS = {"checkpoints", "outputs", "output", "runs", "run", "wandb", "logs", "log", "tmp"}
+
+
+def _is_scratch_family(key: str, parts: tuple) -> bool:
+    """True when an artifact belongs to a training checkpoint or fine-tune output
+    rather than a distinct model worth its own page."""
+    if _CHECKPOINT_RE.match(key) or _SCRATCH_NAME_RE.search(key):
+        return True
+    return any(seg.lower() in _SCRATCH_ANCESTORS for seg in parts[:-1])
+
+
+def detect_model_families(repo: Path) -> list[dict]:
+    """Group model artifacts into named families so the catalog agent can plan one
+    page per model instead of a single lumped 'models' page. A family is the model
+    directory that owns a set of weights/configs — the segment after a models/-style
+    directory when one exists, else the artifact's parent directory. Only families
+    that carry real weights or a recognizable architecture are reported, and training
+    checkpoints / fine-tune output dirs are dropped so the list stays the real models."""
+    repo = repo.resolve()
+    fams: dict[str, dict] = {}
+    for path in iter_source_files(repo):
+        bucket = classify_asset(path)
+        if bucket not in {"weights", "configs"}:
+            continue
+        parts = path.relative_to(repo).parts
+        dirs = [p.lower() for p in parts[:-1]]
+        key = root_parts = None
+        for i, seg in enumerate(dirs):
+            if seg in MODEL_DIR_HINTS and i + 1 <= len(parts) - 2:
+                key, root_parts = parts[i + 1], parts[: i + 2]
+                break
+        if key is None:
+            key = parts[-2] if len(parts) >= 2 else repo.name
+            root_parts = parts[:-1] if len(parts) >= 2 else ()
+        if _is_scratch_family(key, parts):
+            continue
+        fam = fams.setdefault(key, {"name": key, "dir": "/".join(root_parts),
+                                    "arch": None, "formats": set(), "config": ""})
+        if bucket == "weights":
+            fam["formats"].add(path.suffix.lower())
+        if path.name.lower() == "config.json":
+            fam["config"] = fam["config"] or path.relative_to(repo).as_posix()
+            fam["arch"] = fam["arch"] or _read_arch_name(path)
+    out = []
+    for fam in fams.values():
+        if not fam["formats"] and not fam["arch"]:
+            continue  # a lone non-model config.json is not a model family
+        out.append({"name": fam["name"], "dir": fam["dir"], "arch": fam["arch"],
+                    "formats": sorted(fam["formats"]), "config": fam["config"]})
+    return sorted(out, key=lambda f: f["name"])
 
 
 def asset_inventory(repo: Path) -> dict[str, dict]:
@@ -518,7 +606,7 @@ def asset_inventory(repo: Path) -> dict[str, dict]:
     repo = repo.resolve()
     buckets: dict[str, dict] = {}
     for path in iter_source_files(repo):
-        bucket = classify_asset(path.suffix)
+        bucket = classify_asset(path)
         if not bucket:
             continue
         entry = buckets.setdefault(bucket, {"files": 0, "bytes": 0, "exts": {}})
@@ -548,7 +636,7 @@ def build_project_profile(repo: Path) -> ProjectProfile:
             source_files += 1
             language_counts[lang] = language_counts.get(lang, 0) + 1
         else:
-            bucket = classify_asset(path.suffix)
+            bucket = classify_asset(path)
             if bucket:
                 asset_counts[bucket] += 1
     primary_languages = [
@@ -574,6 +662,7 @@ def build_project_profile(repo: Path) -> ProjectProfile:
         model_files=asset_counts["weights"],
         config_files=asset_counts["configs"],
         data_files=asset_counts["data"],
+        models=detect_model_families(repo),
     )
 
 
@@ -1118,27 +1207,45 @@ def tool_usage_description(enable_shell: bool) -> str:
 # Phase 1 — catalog                                                           #
 # --------------------------------------------------------------------------- #
 
-CATALOG_ML_GUIDANCE = """## ML/Model Project Lens
-This repository is a machine-learning / model project. Treat config files, training
-recipes, and shell scripts as PRIMARY evidence, not noise — in these projects the
-logic lives in configs and model artifacts, not only in call graphs. Beyond the
-software kinds, plan pages for what makes an ML project understandable, using the
-extra kinds where evidence supports them:
-- model-architecture: which models exist, their structure and provenance (base models, fine-tunes, adapters)
-- training: the training/fine-tuning recipe — datasets, objective, key hyperparameters (read *_cfg*.yaml, train*.yaml)
-- data-pipeline: how raw inputs become model-ready tensors (preprocessing, tokenization, feature extraction)
-- evaluation: metrics, benchmarks, and how quality is measured
-- model-conversion: export / quantization / compilation steps (e.g. pth->onnx->om) and the target hardware
-- model-serving: how a trained model is loaded and served for inference (engine, app, runtime target)
-You CANNOT read binary weight files (.pth/.safetensors/.onnx/.om/...). Infer the model
-inventory from configs, export/convert scripts, and loader code — never from the weights."""
+CATALOG_ML_GUIDANCE = """## ML / Model Project Lens — THIS OVERRIDES the generic "Required Priority" and "Depth Policy" above
+This repository is a machine-learning / model project. Its substance is the MODELS
+themselves — their architecture, inputs/outputs, and label taxonomy — not the serving
+code around them. Document it MODEL-FIRST:
 
-PAGE_ML_GUIDANCE = """- For `model-architecture`: describe the model(s), their type/provenance, and structure. Cite config and modeling files, not weights.
-- For `training`: describe the training/fine-tuning recipe — data, objective, key hyperparameters — from *_cfg*.yaml and training scripts.
-- For `data-pipeline`: trace raw input -> model-ready tensors (preprocess, tokenize, feature extraction steps).
-- For `evaluation`: describe metrics and how model quality is measured.
-- For `model-conversion`: explain export/quantization/compilation steps and their target runtime/hardware.
-- For `model-serving`: explain how a trained model is loaded and served for inference.
+1. The `models` list in the project profile enumerates the model families (with each
+   one's detected architecture, weight formats, and config path). Plan ONE
+   `model-architecture` page PER model family in that list. Do NOT merge distinct
+   models into one page, and do NOT drop a model to fit the budget — every model family
+   gets its own page regardless of the requested depth. Title each page after the model
+   (its architecture class or the modality it handles), not the folder name.
+2. Each model page must be able to cover: what the model is and where it comes from
+   (base model / fine-tune), its structure (layers, hidden size, attention heads,
+   parameter scale), its input/output tensors, and — for a classifier — its label
+   taxonomy (id2label). Point its `files` at that family's `config.json` /
+   `preprocessor_config.json`, its modeling code (model.py / modeling_*.py), and its
+   export/convert script.
+3. Then add supporting pages where evidence exists:
+   - data-pipeline: how each raw modality becomes a model-ready tensor (preprocessing, tokenization, feature extraction)
+   - model-conversion: the export / quantization / compilation chain (e.g. pth->onnx->om) and the TARGET hardware / runtime
+   - model-serving: how the models are loaded and served for inference (engine, worker pools, app entry)
+   - training / evaluation: only if training recipes or metrics are actually present
+4. Generic software pages (`architecture`, `runtime-flow`, `extension-points`) are
+   OPTIONAL here — include AT MOST ONE, and only if it adds understanding the model and
+   serving pages do not. Prefer model coverage over software-structure coverage.
+
+You CANNOT read binary weight files (.pth/.safetensors/.onnx/.om/...). Infer each model
+from its config.json, modeling code, and convert/export scripts — never from the
+weights. Model configs here are JSON (config.json), not YAML."""
+
+PAGE_ML_GUIDANCE = """- For `model-architecture`: document THIS ONE model. Cover what it is and its provenance
+  (base model / fine-tune), its structure (layers, hidden size, attention heads, parameter
+  scale), its input/output tensors, and its label taxonomy (id2label) if it is a classifier.
+  Read the family's config.json / preprocessor_config.json and its modeling code
+  (model.py / modeling_*.py); cite those, never the binary weights.
+- For `data-pipeline`: trace raw input -> model-ready tensor per modality (preprocess, tokenize, feature-extract).
+- For `model-conversion`: explain the export / quantization / compilation chain and its target runtime / hardware, citing the convert/export scripts.
+- For `model-serving`: explain how the trained models are loaded and served for inference (engine, worker pools, app entry point).
+- For `training` / `evaluation`: describe the recipe or the metrics only if such evidence exists.
 - You cannot read binary weights; infer models from configs and scripts, and cite those."""
 
 
@@ -1364,13 +1471,14 @@ def _shorten_title(title: str, limit: int = 80) -> str:
     return title[: limit - 3].rstrip() + "..."
 
 
-def clean_catalog_pages(repo: Path, pages: list[dict], topic_budget: int) -> list[dict]:
+def clean_catalog_pages(repo: Path, pages: list[dict], topic_budget: int,
+                        allowed_kinds: set[str] = TOPIC_KINDS) -> list[dict]:
     cleaned: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for page in pages:
         title = _shorten_title(str(page.get("title", "")).strip())
         kind = str(page.get("kind", "")).strip()
-        if not title or kind not in TOPIC_KINDS:
+        if not title or kind not in allowed_kinds:
             continue
         evidence = normalize_evidence_files(repo, list(page.get("evidenceFiles") or []))
         if not evidence:
@@ -1569,7 +1677,7 @@ def assign_page_fields(pages: list[dict], repo: Path | None = None) -> list[dict
 def _catalog_pages_from_raw(repo: Path, raw: str, topic_budget: int,
                             allowed_kinds: set[str] = TOPIC_KINDS) -> tuple[list[dict], str]:
     try:
-        pages = clean_catalog_pages(repo, parse_catalog(raw, allowed_kinds), topic_budget)
+        pages = clean_catalog_pages(repo, parse_catalog(raw, allowed_kinds), topic_budget, allowed_kinds)
     except ValueError as e:
         return [], str(e)
     defect = catalog_defect(pages)
@@ -1581,6 +1689,10 @@ def _catalog_pages_from_raw(repo: Path, raw: str, topic_budget: int,
 def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
                   settings: LLMSettings, tree: str, profile: ProjectProfile) -> list[dict]:
     topic_budget = topic_budget_for_depth(config.depth, config.max_topics)
+    if config.mode == "ml" and profile.models:
+        # Guarantee room for one page per model family plus a few supporting pages,
+        # so a small default depth can never squeeze the per-model pages out.
+        topic_budget = max(topic_budget, min(config.max_topics, len(profile.models) + 4))
     allowed_kinds, catalog_guidance, _ = preset_for(config.mode)
     ctx = {
         "workdir": str(repo),
@@ -1625,10 +1737,32 @@ def lang_name(doc_lang: str) -> str:
     return {"zh": "Chinese", "en": "English"}.get(lang_code(doc_lang), doc_lang)
 
 
+def _summary_profile_lines(profile: ProjectProfile) -> list[str]:
+    """A compact at-a-glance header for SUMMARY.md, built only from the already
+    computed profile (no extra I/O). Surfaces the model inventory that otherwise
+    lives buried in wiki.json, so opening SUMMARY.md shows what the repo is made
+    of before the page list."""
+    facts: list[str] = []
+    if profile.primary_languages:
+        facts.append(", ".join(profile.primary_languages))
+    facts.append(f"{profile.source_files} source · {profile.total_files} files")
+    tags = [name for name, on in (("tests", profile.has_tests), ("CI", profile.has_ci)) if on]
+    if tags:
+        facts.append(" · ".join(tags))
+    lines = [f"> {'  ·  '.join(facts)}"] if facts else []
+    if profile.models:
+        lines += ["", "**Models**", "", "| Model | Architecture | Formats |", "| --- | --- | --- |"]
+        for m in profile.models:
+            arch = m.get("arch") or "—"
+            fmts = " ".join(m.get("formats") or []) or "—"
+            lines.append(f"| {m['name']} | {arch} | {fmts} |")
+    return lines
+
+
 def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
                      started: datetime, doc_lang: str, depth: str,
                      profile: ProjectProfile, manifest: dict,
-                     source_root: Path | None = None) -> None:
+                     source_root: Path | None = None, mode: str = "software") -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / WIKI_PAGE_DIR).mkdir(parents=True, exist_ok=True)
     meta = {
@@ -1637,6 +1771,7 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "language": lang_code(doc_lang),
         "depth": depth,
+        "mode": mode,
         "project_profile": asdict(profile),
         "source_root": str(source_root) if source_root else "",
         "pages": [
@@ -1654,6 +1789,10 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     summary = ["# Wiki\n"]
+    overview = _summary_profile_lines(profile)
+    if overview:
+        summary.extend(overview)
+        summary.append("")
     last_section = last_group = None
     for p in pages:
         if p["section"] != last_section:
@@ -1870,7 +2009,8 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         started = datetime.now(timezone.utc)
         run_id = started.astimezone().strftime("%Y-%m-%d-%H%M%S")
         write_wiki_index(output_root, pages, run_id, started, config.doc_lang,
-                         config.depth, current_profile, current_manifest, source_root=repo)
+                         config.depth, current_profile, current_manifest,
+                         source_root=repo, mode=config.mode)
         cleanup_removed_pages(output_root, previous_pages, pages)
 
     force_pages = args.force or not existing
