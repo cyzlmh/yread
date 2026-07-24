@@ -849,6 +849,40 @@ def test_generate_explanation_renders_markdown() -> None:
     assert captured["messages"][1]["content"] == "ViT"
 
 
+def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
+    """GET / redirects to the first page even when its slug is CJK — the redirect
+    target must be percent-encoded (HTTP headers are latin-1) and /p/ must decode."""
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True)
+    slug = "1-项目概览"
+    (wiki / f"{slug}.md").write_text("# 概览\n\n正文\n", encoding="utf-8")
+    pages = [{"slug": slug, "title": "概览", "file": f"wiki/{slug}.md", "section": "S"}]
+
+    viewer.Handler.wiki = tmp_path
+    viewer.Handler.pages = pages
+    viewer.Handler.byslug = {p["slug"]: p for p in pages}
+    viewer.Handler.repo = None
+    viewer.Handler.settings = None
+    viewer.Handler.client = None
+    viewer.Handler.lang = "zh"
+    viewer.Handler.explain_cache = {}
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), viewer.Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # urlopen follows the 302 to the encoded /p/<slug> and must land on the page
+        body = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode("utf-8")
+        assert "概览" in body
+        assert "if(!false)" in body  # explain assets present but disabled (no settings)
+    finally:
+        srv.shutdown()
+
+
 def test_build_profile_populates_ml_fields(tmp_path: Path) -> None:
     (tmp_path / "model.pth").write_bytes(b"\x00")
     (tmp_path / "cfg.yaml").write_text("a: 1\n")

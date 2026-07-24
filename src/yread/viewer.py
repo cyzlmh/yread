@@ -16,7 +16,7 @@ import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import markdown
 
@@ -238,7 +238,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/":
-            self.send_response(302); self.send_header("Location", f"/p/{self.pages[0]['slug']}")
+            # Slugs keep CJK/Unicode; HTTP headers are latin-1, so the redirect
+            # target must be percent-encoded or send_header raises.
+            self.send_response(302)
+            self.send_header("Location", "/p/" + quote(self.pages[0]["slug"]))
             self.end_headers(); return
         if path.startswith("/src/") and self.repo:
             f = safe_source_path(self.repo, path[len("/src/"):])
@@ -246,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(f.read_text(errors="replace").encode(), "text/plain; charset=utf-8")
             return self._send(b"not found", code=404)
         if path.startswith("/p/"):
-            slug = path[len("/p/"):]
+            slug = unquote(path[len("/p/"):])  # browsers percent-encode CJK slugs
             p = self.byslug.get(slug)
             if not p:
                 return self._send(b"page not found", code=404)
