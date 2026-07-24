@@ -856,7 +856,7 @@ def test_generate_explanation_renders_markdown() -> None:
     assert captured["messages"][1]["content"] == "ViT"
 
 
-def test_generate_explanation_with_question_grounds_in_selection() -> None:
+def test_generate_explanation_uses_custom_prompt() -> None:
     from types import SimpleNamespace
 
     captured: dict = {}
@@ -866,10 +866,17 @@ def test_generate_explanation_with_question_grounds_in_selection() -> None:
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ans"))])
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    viewer.generate_explanation(client, "m1", "zh", "a selected passage", "这段在讲什么?")
+    viewer.generate_explanation(client, "m1", "zh", "a selected passage", "翻译成英文")
     sys_msg, user_msg = captured["messages"][0]["content"], captured["messages"][1]["content"]
-    assert "question" in sys_msg.lower()  # ASK_SYSTEM path, not the term-explain path
-    assert "a selected passage" in user_msg and "这段在讲什么?" in user_msg
+    assert "翻译成英文" in sys_msg          # the custom prompt drives the instruction
+    assert "Chinese" in sys_msg             # answer language still enforced
+    assert user_msg == "a selected passage"  # the selection is the user content
+
+
+def test_default_explain_prompt_by_language() -> None:
+    assert "解释" in viewer.default_explain_prompt("zh")
+    assert "explain" in viewer.default_explain_prompt("en").lower()
+    assert viewer.default_explain_prompt("de") == viewer.default_explain_prompt("en")  # fallback
 
 
 def test_build_profile_html_renders_from_meta() -> None:

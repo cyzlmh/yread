@@ -23,38 +23,39 @@ import markdown
 
 SENSITIVE_SOURCE_NAMES = {".env", ".env.local", ".npmrc", ".pypirc", ".netrc", "auth.json", "credentials.json"}
 
-# Select-to-explain / ask: a reader selects text (a term like ViT, or a whole
-# passage) and either gets a short generic explanation or asks a custom question
-# about the selection, answered by the LLM configured in ~/.yread/config.env.
+# Select-to-explain: a reader selects text (a term or a passage) and gets an
+# explanation from the LLM configured in ~/.yread/config.env. The instruction that
+# drives the explanation is customizable — editable in the popover and remembered
+# in the browser — with EXPLAIN_SYSTEM / DEFAULT_EXPLAIN_PROMPT as the built-in default.
 LANG_NAMES = {"zh": "Chinese", "en": "English"}
 MAX_SELECTION = 2000  # chars — a term or a paragraph, but not a whole page
 EXPLAIN_SYSTEM = (
-    "You explain a technical term for a developer reading project documentation. "
-    "Given the term, give a concise 2-4 sentence explanation of what it is and why it "
+    "You explain a technical term or passage for a developer reading project "
+    "documentation. Give a concise 2-4 sentence explanation of what it is and why it "
     "matters. Answer in {lang}. Plain prose; inline code for names/APIs is fine. Do "
-    "not ask questions, add a preamble, or restate the term as a heading."
+    "not add a preamble or restate the selection as a heading."
 )
-ASK_SYSTEM = (
-    "You answer a developer's question about a selected passage from project "
-    "documentation. Be concise and concrete, grounded in the selected text. Answer "
-    "in {lang}. Plain prose; inline code for names/APIs is fine. Do not add a preamble."
-)
+DEFAULT_EXPLAIN_PROMPT = {
+    "zh": "简明解释选中的内容（2-4 句）：它是什么、为什么重要。",
+    "en": "Concisely explain the selection (2-4 sentences): what it is and why it matters.",
+}
 
 
-def generate_explanation(client, model: str, lang: str, term: str, question: str = "") -> str:
-    """Explain ``term`` (when ``question`` is empty) or answer ``question`` about the
-    selected ``term`` text. Returns rendered HTML."""
+def default_explain_prompt(lang: str) -> str:
+    return DEFAULT_EXPLAIN_PROMPT.get(lang, DEFAULT_EXPLAIN_PROMPT["en"])
+
+
+def generate_explanation(client, model: str, lang: str, term: str, prompt: str = "") -> str:
+    """Explain the selected ``term`` text. ``prompt`` is the (user-customizable)
+    instruction; when empty the built-in default explanation prompt is used.
+    Returns rendered HTML."""
     lang_name = LANG_NAMES.get(lang, lang or "English")
-    if question:
-        messages = [
-            {"role": "system", "content": ASK_SYSTEM.format(lang=lang_name)},
-            {"role": "user", "content": f'Selected text:\n"""\n{term}\n"""\n\nQuestion: {question}'},
-        ]
+    if prompt:
+        system = (f"{prompt}\n\nAnswer in {lang_name}. Be concise; plain prose, inline "
+                  "code for names/APIs is fine; no preamble.")
     else:
-        messages = [
-            {"role": "system", "content": EXPLAIN_SYSTEM.format(lang=lang_name)},
-            {"role": "user", "content": term},
-        ]
+        system = EXPLAIN_SYSTEM.format(lang=lang_name)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": term}]
     resp = client.chat.completions.create(model=model, messages=messages)
     text = (resp.choices[0].message.content or "").strip()
     return markdown.markdown(text, extensions=["fenced_code"])
@@ -98,7 +99,6 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  #yr-ebub{{position:absolute;z-index:61;display:none;width:360px;max-width:92vw;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13.5px;line-height:1.6}}
  #yr-ebub .yr-ctx{{font-size:12px;color:var(--muted);background:var(--side);border-radius:6px;padding:5px 22px 5px 8px;margin:0 0 8px;max-height:52px;overflow:auto}}
  #yr-ebub .yr-body{{max-height:300px;overflow:auto}}
- #yr-ebub .yr-q{{font-weight:600;font-size:12.5px;margin:8px 0 2px}}
  #yr-ebub .yr-a p{{margin:.35em 0}} #yr-ebub .yr-a code{{font-size:85%}}
  #yr-ebub .yr-ask{{display:flex;gap:6px;margin-top:10px}}
  #yr-ebub .yr-ask input{{flex:1;min-width:0;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:12.5px;background:var(--bg);color:var(--fg)}}
@@ -153,31 +153,31 @@ EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
   document.addEventListener('mousedown',dismiss);
   document.addEventListener('touchstart',dismiss);
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){hideBtn();hideBub();}});
-  function ask(question){
-    var body=bub.querySelector('.yr-body');
-    var turn=document.createElement('div'); turn.className='yr-turn';
-    turn.innerHTML=(question?'<div class="yr-q">'+esc(question)+'</div>':'')+'<div class="yr-a">…</div>';
-    body.appendChild(turn); body.scrollTop=body.scrollHeight;
-    var a=turn.querySelector('.yr-a');
+  var LS='yr_explain_prompt';
+  function savedPrompt(){ try{return localStorage.getItem(LS)||'';}catch(e){return '';} }
+  function run(promptVal){
+    var body=bub.querySelector('.yr-body'); body.innerHTML='<div class="yr-a">…</div>';
+    var a=body.querySelector('.yr-a');
     fetch('/explain',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({term:term,question:question||''})})
+      body:JSON.stringify({term:term,prompt:promptVal||''})})
       .then(function(res){return res.json();})
-      .then(function(d){a.innerHTML=d.html||esc(d.error||'（无结果）'); body.scrollTop=body.scrollHeight;})
+      .then(function(d){a.innerHTML=d.html||esc(d.error||'（无结果）');})
       .catch(function(err){a.textContent='请求失败：'+err;});
   }
   btn.addEventListener('click',function(){
     var sel=window.getSelection();
     var r=(sel&&sel.rangeCount)?sel.getRangeAt(0).getBoundingClientRect():btn.getBoundingClientRect();
     var head=term.length>140?term.slice(0,140)+'…':term;
+    var p=savedPrompt()||(window.YR_DEFAULT_PROMPT||'');
     bub.innerHTML='<span class="yr-x">×</span><div class="yr-ctx">'+esc(head)+'</div>'
       +'<div class="yr-body"></div>'
-      +'<form class="yr-ask"><input placeholder="追问这段…（Enter 发送）" maxlength="500"><button type="submit">→</button></form>';
+      +'<form class="yr-ask"><input class="yr-prompt" value="'+esc(p)+'" placeholder="解释提示词（可编辑，回车重新解释）" maxlength="1000"><button type="submit">解释</button></form>';
     place(bub,r); bub.style.display='block'; hideBtn();
     bub.querySelector('.yr-x').onclick=hideBub;
-    var form=bub.querySelector('.yr-ask'), inp=form.querySelector('input');
-    form.addEventListener('submit',function(e){e.preventDefault(); var q=inp.value.trim(); if(!q)return; inp.value=''; ask(q);});
-    ask('');            // initial generic explanation
-    setTimeout(function(){inp.focus();},0);
+    var form=bub.querySelector('.yr-ask'), inp=form.querySelector('.yr-prompt');
+    // editing the prompt + submitting re-runs and remembers it as the new default
+    form.addEventListener('submit',function(e){e.preventDefault(); var v=inp.value.trim(); try{localStorage.setItem(LS,v);}catch(_){}; run(v);});
+    run(p);            // auto-run with the current (saved or default) prompt
   });
 })();
 </script>"""
@@ -217,10 +217,11 @@ LAYOUT_JS = """<script>
 </script>"""
 
 
-def page_scripts(explain_enabled: bool) -> str:
-    """All page-level scripts: the always-on sidebar toggle plus the optional
-    select-to-explain layer."""
-    return LAYOUT_JS + explain_assets(explain_enabled)
+def page_scripts(explain_enabled: bool, lang: str = "en") -> str:
+    """All page-level scripts: the injected default explain prompt, the always-on
+    sidebar/zoom layout script, and the optional select-to-explain layer."""
+    prompt_js = f"<script>window.YR_DEFAULT_PROMPT={json.dumps(default_explain_prompt(lang))};</script>"
+    return prompt_js + LAYOUT_JS + explain_assets(explain_enabled)
 
 
 def build_nav(pages, active, on_home=False):
@@ -317,17 +318,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
             term = (payload.get("term") or "").strip()
-            question = (payload.get("question") or "").strip()[:500]
+            prompt = (payload.get("prompt") or "").strip()[:1000]
         except (ValueError, OSError):
-            term, question = "", ""
+            term, prompt = "", ""
         if not term or len(term) > MAX_SELECTION:
             return self._send_json({"error": "无效选区"})
-        key = f"{question}\n##\n{term}".lower()
+        key = f"{prompt}\n##\n{term}".lower()
         cached = self.explain_cache.get(key)
         if cached is not None:
             return self._send_json({"html": cached})
         try:
-            html = generate_explanation(self.client, self.settings.model, self.lang, term, question)
+            html = generate_explanation(self.client, self.settings.model, self.lang, term, prompt)
         except Exception as e:  # noqa: BLE001 — surface the failure to the bubble, don't crash the server
             return self._send_json({"error": f"生成失败：{e}"})
         self.explain_cache[key] = html
@@ -340,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
                 html = PAGE.format(title=self.home_title,
                                    nav=build_nav(self.pages, None, on_home=True),
                                    body=self.home_body,
-                                   scripts=page_scripts(bool(self.settings and self.client)))
+                                   scripts=page_scripts(bool(self.settings and self.client), self.lang))
                 return self._send(html.encode())
             # No reconstructable profile: fall back to the first page. Slugs keep
             # CJK/Unicode; HTTP headers are latin-1, so the target must be encoded.
@@ -362,7 +363,7 @@ class Handler(BaseHTTPRequestHandler):
             html = PAGE.format(title=p["title"],
                                nav=build_nav(self.pages, slug),
                                body=render_body(md_text, slugs, self.repo),
-                               scripts=page_scripts(bool(self.settings and self.client)))
+                               scripts=page_scripts(bool(self.settings and self.client), self.lang))
             return self._send(html.encode())
         self._send(b"not found", code=404)
 
