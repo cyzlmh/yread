@@ -2,13 +2,13 @@
 
     yread browse [wiki_dir] [--host localhost] [--port 8000] [--repo <repo_path>]
 
-wiki_dir defaults to ./.yread. It serves a v2 wiki root with wiki.json and
-Markdown pages under wiki/. Old versioned wiki roots are still accepted.
+wiki_dir defaults to ./.yread and must contain a v2 wiki.json plus Markdown
+pages under wiki/.
 
-Renders each page's markdown with mermaid diagrams, a section/kind sidebar from
-wiki.json, and resolves the inter-page `[title](slug)` cross-links. The source
-repo recorded in wiki.json (`source_root`) makes `Sources: [file](path#Lx-Ly)`
-citations link to the real files; pass --repo to override it.
+Renders each page's markdown with mermaid diagrams, a flat page sidebar from
+wiki.json, and resolves the inter-page `[title](slug)` cross-links. Pass --repo
+to make `Sources: [file](path#Lx-Ly)` citations link to the real files (older
+wikis may still carry a `source_root` and resolve it automatically).
 """
 import json
 import re
@@ -47,29 +47,10 @@ def generate_explanation(client, model: str, lang: str, term: str) -> str:
     return markdown.markdown(text, extensions=["fenced_code"])
 
 
-def _resolve_versioned_wiki(root: Path) -> Path | None:
-    cur = root / "current"
-    if cur.exists():
-        return (root / cur.read_text().strip()).resolve()
-    versions = sorted((root / "versions").glob("*")) if (root / "versions").exists() else []
-    if versions:
-        return versions[-1]
-    return None
-
-
 def resolve_wiki(arg: str | None) -> Path:
     root = Path(arg).resolve() if arg else Path(".yread").resolve()
     if (root / "wiki.json").exists():
         return root
-    legacy = _resolve_versioned_wiki(root)
-    if legacy:
-        return legacy
-    legacy_root = root / "wiki"
-    if (legacy_root / "wiki.json").exists():
-        return legacy_root
-    legacy = _resolve_versioned_wiki(legacy_root)
-    if legacy:
-        return legacy
     raise SystemExit(f"no wiki.json under {root}")
 
 
@@ -84,8 +65,6 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .wrap{{display:flex;min-height:100vh}}
  nav{{width:320px;flex:none;background:var(--side);border-right:1px solid var(--line);padding:18px 14px;overflow-y:auto;height:100vh;position:sticky;top:0;z-index:65}}
  nav h1{{font-size:14px;margin:4px 6px 14px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}}
- nav .sec{{font-weight:700;margin:16px 6px 6px;font-size:13px;color:var(--fg)}}
- nav .grp{{font-weight:600;margin:10px 6px 4px;font-size:12px;color:var(--muted)}}
  nav a{{display:block;padding:5px 8px;border-radius:6px;color:var(--fg);text-decoration:none;font-size:13.5px}}
  nav a:hover{{background:#eaeef2}} nav a.active{{background:#ddf4ff;color:var(--accent);font-weight:600}}
  nav .lv{{color:var(--muted);font-size:11px;margin-left:4px}}

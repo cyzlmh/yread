@@ -436,17 +436,6 @@ def _relative_source_path(repo: Path, path: str | Path) -> str | None:
     return rel.as_posix()
 
 
-def normalize_source_paths(repo: Path, paths: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for path in paths:
-        rel = _relative_source_path(repo, path)
-        if rel and rel not in seen:
-            seen.add(rel)
-            result.append(rel)
-    return result
-
-
 def normalize_evidence_files(repo: Path, paths: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
