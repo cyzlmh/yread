@@ -1843,15 +1843,10 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         git = git_stats(source_root)
     summary = ["# Wiki\n"]
     summary.extend(_summary_profile_lines(meta, profile, code=code, git=git))
-    summary.append("")
-    last_section = last_group = None
+    # A flat page list, one entry per generated page file — no section/group
+    # headers, so the index mirrors what actually exists under wiki/.
+    summary.append(f"\n## {'页面' if lang_code(doc_lang) == 'zh' else 'Pages'}\n")
     for p in pages:
-        if p["section"] != last_section:
-            summary.append(f"\n## {p['section']}\n")
-            last_section, last_group = p["section"], None
-        if p.get("group") and p["group"] != last_group:
-            summary.append(f"\n**{p['group']}**\n")
-            last_group = p["group"]
         summary.append(f"- [{p['title']}]({p['file']}) `{p.get('kind', '')}` `{p.get('level', '')}`")
     (output_root / "SUMMARY.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     write_manifest(output_root, manifest)

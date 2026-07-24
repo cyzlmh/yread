@@ -192,16 +192,11 @@ def page_scripts(explain_enabled: bool) -> str:
 
 
 def build_nav(pages, active, on_home=False):
+    # Flat page list — one link per generated page, no section/group headers — so
+    # the sidebar mirrors the actual wiki/ markdown files.
     home_cls = " active" if on_home else ""
     out = ['<h1>Wiki</h1>', f'<a class="page{home_cls}" href="/">◈ Profile</a>']
-    last_sec, last_grp = None, None
     for p in pages:
-        if p.get("section") != last_sec:
-            last_sec = p.get("section"); last_grp = None
-            out.append(f'<div class="sec">{last_sec or ""}</div>')
-        grp = p.get("group")
-        if grp and grp != last_grp:
-            last_grp = grp; out.append(f'<div class="grp">{grp}</div>')
         cls = " active" if p["slug"] == active else ""
         meta = p.get("kind") or p.get("level", "")
         lv = f'<span class="lv">{meta}</span>' if meta else ""
