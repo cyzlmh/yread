@@ -1820,7 +1820,9 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         "depth": depth,
         "mode": mode,
         "project_profile": asdict(profile),
-        "source_root": str(source_root) if source_root else "",
+        # The absolute source path is intentionally NOT persisted — wiki.json ships
+        # alongside SUMMARY.md and a local path leaks the username/layout. Pass
+        # `yread browse --repo <path>` at view time for source links / live loc-git.
         "pages": [
             {k: v for k, v in (
                 ("slug", p["slug"]), ("title", p["title"]), ("file", p["file"]),

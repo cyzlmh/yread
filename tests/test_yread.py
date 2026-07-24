@@ -192,7 +192,7 @@ def test_wiki_is_incomplete(tmp_path: Path) -> None:
     assert yread.wiki_is_incomplete(tmp_path, pages) is False
 
 
-def test_wiki_index_records_source_root(tmp_path: Path) -> None:
+def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
     import json
     from datetime import datetime, timezone
 
@@ -217,7 +217,7 @@ def test_wiki_index_records_source_root(tmp_path: Path) -> None:
     assert meta["depth"] == "brief"
     assert meta["mode"] == "software"
     assert meta["project_profile"]["has_readme"] is True
-    assert meta["source_root"] == str(tmp_path / "repo")
+    assert "source_root" not in meta  # absolute path is never persisted (privacy)
     assert meta["pages"][0]["file"] == "wiki/a.md"
     assert meta["pages"][0]["kind"] == "overview"
     assert meta["pages"][0]["evidenceFiles"] == ["README.md"]
