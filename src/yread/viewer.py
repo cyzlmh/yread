@@ -75,7 +75,8 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  pre code{{background:none;padding:0}}
  table{{border-collapse:collapse;margin:14px 0;display:block;overflow-x:auto}}
  th,td{{border:1px solid var(--line);padding:7px 12px}} th{{background:var(--side)}}
- .mermaid{{background:var(--side);border-radius:8px;padding:14px;margin:16px 0;text-align:center}}
+ .mermaid{{background:var(--side);border-radius:8px;padding:14px;margin:16px 0;text-align:center;cursor:zoom-in}}
+ main img{{max-width:100%;cursor:zoom-in}}
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
  #yr-ebtn{{position:absolute;z-index:60;display:none;padding:3px 11px;font:12.5px/1.4 inherit;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)}}
@@ -85,6 +86,10 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  #yr-ebub .yr-x{{position:absolute;top:5px;right:9px;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}}
  #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
  #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:64}}
+ #yr-zoom{{display:none;position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.82);align-items:center;justify-content:center;padding:24px;cursor:zoom-out}}
+ #yr-zoom .yr-zoom-inner{{background:var(--bg);border-radius:10px;padding:18px;max-width:96vw;max-height:94vh;overflow:auto}}
+ #yr-zoom .yr-zoom-inner svg{{width:min(1400px,90vw);height:auto;max-width:none}}
+ #yr-zoom .yr-zoom-inner img{{max-width:90vw;max-height:88vh}}
  @media (max-width:800px){{
    nav{{position:fixed;left:0;top:0;height:100vh;transform:translateX(-100%);transition:transform .22s ease;box-shadow:2px 0 16px rgba(0,0,0,.15)}}
    body.sb-open nav{{transform:translateX(0)}}
@@ -92,7 +97,7 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
    #yr-menu{{display:flex}}
    main{{padding:64px 20px 40px;max-width:100%}}
  }}
-</style></head><body><button id="yr-menu" aria-label="目录">☰</button><div id="yr-backdrop"></div><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
+</style></head><body><button id="yr-menu" aria-label="目录">☰</button><div id="yr-backdrop"></div><div id="yr-zoom"><div class="yr-zoom-inner"></div></div><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
 
 
 EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
@@ -155,11 +160,25 @@ def explain_assets(enabled: bool) -> str:
 LAYOUT_JS = """<script>
 (function(){
   var m=document.getElementById('yr-menu'), b=document.getElementById('yr-backdrop'), nav=document.querySelector('nav');
-  if(!m) return;
-  function toggle(){document.body.classList.toggle('sb-open');}
-  m.addEventListener('click',toggle);
-  if(b) b.addEventListener('click',toggle);
-  if(nav) nav.addEventListener('click',function(e){if(e.target.tagName==='A') document.body.classList.remove('sb-open');});
+  if(m){
+    function toggle(){document.body.classList.toggle('sb-open');}
+    m.addEventListener('click',toggle);
+    if(b) b.addEventListener('click',toggle);
+    if(nav) nav.addEventListener('click',function(e){if(e.target.tagName==='A') document.body.classList.remove('sb-open');});
+  }
+  // Click-to-zoom for mermaid diagrams and images.
+  var main=document.querySelector('main'), zoom=document.getElementById('yr-zoom');
+  if(main&&zoom){
+    var inner=zoom.querySelector('.yr-zoom-inner');
+    function close(){zoom.style.display='none';inner.innerHTML='';}
+    main.addEventListener('click',function(e){
+      var el=e.target.closest('.mermaid, img'); if(!el) return;
+      inner.innerHTML = el.tagName==='IMG' ? '<img src="'+el.getAttribute('src')+'">' : el.innerHTML;
+      zoom.style.display='flex';
+    });
+    zoom.addEventListener('click',close);
+    document.addEventListener('keydown',function(e){if(e.key==='Escape') close();});
+  }
 })();
 </script>"""
 
