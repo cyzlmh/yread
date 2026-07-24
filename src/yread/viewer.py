@@ -95,16 +95,17 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  main img{{max-width:100%;cursor:zoom-in}}
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
- #yr-ebub{{position:absolute;z-index:61;display:none;width:360px;max-width:92vw;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13.5px;line-height:1.6}}
- #yr-ebub.yr-docked{{position:fixed;inset:0 0 0 auto;width:360px;max-width:90vw;height:100vh;border:none;border-left:1px solid var(--line);border-radius:0;box-shadow:-2px 0 16px rgba(0,0,0,.08);padding:44px 16px 16px;overflow:auto}}
- #yr-ebub .yr-body{{max-height:300px;overflow:auto;margin-top:8px}}
- #yr-ebub.yr-docked .yr-body{{max-height:none}}
+ #yr-ebub{{display:none;position:fixed;z-index:61;background:var(--bg);font-size:13.5px;line-height:1.7;overflow:auto}}
+ #yr-ebub .yr-body{{overflow:auto;margin-top:10px}}
  #yr-ebub .yr-body:empty{{display:none}}
- #yr-ebub .yr-a p{{margin:.35em 0}} #yr-ebub .yr-a code{{font-size:85%}}
- #yr-ebub .yr-ask{{display:flex;gap:6px;margin-top:2px}}
- #yr-ebub .yr-ask input{{flex:1;min-width:0;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:12.5px;background:var(--bg);color:var(--fg)}}
- #yr-ebub .yr-ask button{{border:none;background:var(--accent);color:#fff;border-radius:6px;padding:0 11px;cursor:pointer;font-size:14px}}
- #yr-ebub .yr-x{{position:absolute;top:5px;right:9px;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}}
+ #yr-ebub .yr-a p{{margin:.4em 0}} #yr-ebub .yr-a code{{font-size:85%}}
+ #yr-ebub .yr-ask{{display:flex;gap:8px}}
+ #yr-ebub .yr-ask input{{flex:1;min-width:0;border:1px solid var(--line);border-radius:7px;padding:7px 10px;font:inherit;font-size:13px;background:var(--bg);color:var(--fg)}}
+ #yr-ebub .yr-ask button{{border:none;background:var(--accent);color:#fff;border-radius:7px;padding:0 16px;cursor:pointer;font-size:14px}}
+ #yr-ebub .yr-x{{position:absolute;top:6px;right:10px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;color:var(--muted);cursor:pointer;font-size:20px;line-height:1;border-radius:7px}}
+ #yr-ebub .yr-x:hover{{background:var(--side)}}
+ @media (min-width:1100px){{ #yr-ebub{{top:0;right:0;bottom:0;width:370px;max-width:90vw;border-left:1px solid var(--line);box-shadow:-2px 0 16px rgba(0,0,0,.08);padding:48px 18px 18px}} }}
+ @media (max-width:1099px){{ #yr-ebub{{left:0;right:0;bottom:0;max-height:72vh;border-top:1px solid var(--line);border-radius:16px 16px 0 0;box-shadow:0 -4px 24px rgba(0,0,0,.18);padding:44px 16px calc(18px + env(safe-area-inset-bottom))}} }}
  #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
  #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:64}}
  #yr-zoom{{display:none;position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.82);align-items:center;justify-content:center;padding:24px;cursor:zoom-out}}
@@ -128,7 +129,7 @@ EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
   var main=document.querySelector('main'), bub=document.getElementById('yr-ebub'), term='', LS='yr_explain_prompt';
   function esc(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
   function saved(){ try{return localStorage.getItem(LS)||'';}catch(e){return '';} }
-  function hide(){ bub.style.display='none'; }
+  function hide(){ bub.style.display='none'; try{window.getSelection().removeAllRanges();}catch(_){} }
   function run(p){
     var body=bub.querySelector('.yr-body'); body.innerHTML='<div class="yr-a">…</div>';
     var a=body.querySelector('.yr-a');
@@ -138,18 +139,14 @@ EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
       .then(function(d){a.innerHTML=d.html||esc(d.error||'（无结果）');})
       .catch(function(err){a.textContent='请求失败：'+err;});
   }
-  // On selection show the prompt box + button. No request is made until the user
-  // clicks 提问; there is no follow-up — close (× / click away / Esc) dismisses it.
-  function open(r){
+  // On selection show the prompt box + button. No request until the user clicks
+  // 提问; no follow-up. The panel is fixed (docked right on wide screens, a bottom
+  // sheet on narrow ones) so it stays put on scroll, and only the × button closes it.
+  function open(){
     var p=saved()||(window.YR_DEFAULT_PROMPT||'');
     bub.innerHTML='<span class="yr-x">×</span>'
       +'<form class="yr-ask"><input class="yr-prompt" value="'+esc(p)+'" placeholder="提示词（可编辑）" maxlength="1000"><button type="submit">提问</button></form>'
       +'<div class="yr-body"></div>';
-    if(window.matchMedia('(min-width:1100px)').matches){
-      bub.className='yr-docked'; bub.style.left=''; bub.style.top='';           // wide: dock to the right
-    }else{
-      bub.className=''; bub.style.left=(window.scrollX+r.left)+'px'; bub.style.top=(window.scrollY+r.bottom+6)+'px';  // narrow: bubble at selection
-    }
     bub.style.display='block';
     bub.querySelector('.yr-x').onclick=hide;
     var inp=bub.querySelector('.yr-prompt');
@@ -161,13 +158,14 @@ EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
     setTimeout(function(){
       var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
       if(!t||t.length>2000||!sel.rangeCount) return;
-      var r=sel.getRangeAt(0).getBoundingClientRect();
-      if(r.width||r.height){ term=t; open(r); }
+      if(bub.style.display==='block'&&t===term) return;   // already open for this selection
+      term=t; open();
     },10);
   }
-  main.addEventListener('mouseup',onSelect);   // desktop
-  main.addEventListener('touchend',onSelect);  // mobile: tap-drag select
-  // dismissed only by the × button — clicking elsewhere no longer closes it
+  main.addEventListener('mouseup',onSelect);    // desktop
+  main.addEventListener('touchend',onSelect);   // mobile: tap-drag select
+  var selTimer=null;                            // iOS often finalizes selection via selectionchange
+  document.addEventListener('selectionchange',function(){clearTimeout(selTimer);selTimer=setTimeout(onSelect,250);});
 })();
 </script>"""
 
