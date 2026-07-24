@@ -149,6 +149,19 @@ def _run_config(args: argparse.Namespace) -> int:
     raise SystemExit(f"unknown config command: {command}")
 
 
+def _browse_llm_settings() -> core.LLMSettings | None:
+    """Resolve LLM settings for the viewer's select-to-explain feature from the
+    same config the generate command uses. Missing config just disables the
+    feature — browsing must still work with no API key."""
+    from types import SimpleNamespace
+    fake = SimpleNamespace(env_file=None, depth=None, mode=None, output_dir=None)
+    try:
+        config = core.config_from_args(fake, config_files=[CONFIG_FILE])
+        return core.resolve_provider(config)
+    except SystemExit:
+        return None
+
+
 def _run_browse(args: argparse.Namespace) -> int:
     viewer_args = []
     if args.wiki_dir:
@@ -156,7 +169,7 @@ def _run_browse(args: argparse.Namespace) -> int:
     viewer_args.extend(["--host", args.host, "--port", str(args.port)])
     if args.repo:
         viewer_args.extend(["--repo", args.repo])
-    viewer.main(viewer_args)
+    viewer.main(viewer_args, settings=_browse_llm_settings())
     return 0
 
 

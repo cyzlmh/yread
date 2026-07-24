@@ -6,6 +6,7 @@ import pytest
 
 from yread import core as yread
 from yread import cli
+from yread import viewer
 
 
 def _init_git_repo(path: Path) -> None:
@@ -222,9 +223,30 @@ def test_wiki_index_records_source_root(tmp_path: Path) -> None:
     assert meta["pages"][0]["evidenceFiles"] == ["README.md"]
     summary = (output_root / "SUMMARY.md").read_text()
     assert summary.count("(wiki/a.md)") == 1
-    # A profile overview line precedes the page list, but no Models table when empty.
-    assert "> 0 source · 1 files" in summary
+    # SUMMARY carries the run meta (timestamp/mode/depth/lang) and the full profile
+    # table, but no Models table when the profile lists no models.
+    assert "Generated **" in summary and "`brief`" in summary and "`software`" in summary
+    assert "**Profile**" in summary
+    assert "| Files | 0 source · 1 total · max depth 1 |" in summary
     assert "**Models**" not in summary
+
+
+def test_summary_profile_lines_includes_loc_and_git() -> None:
+    profile = yread.ProjectProfile(
+        total_files=10, source_files=5, primary_languages=["Python"], max_depth=3,
+        has_readme=True, has_tests=True, has_ci=False, package_files=[], entry_points=[],
+    )
+    meta = {"generated_at": "2026-07-24T04:18:15Z", "id": "run1",
+            "mode": "software", "depth": "brief", "language": "zh"}
+    code = {"core_files": 5, "core_loc": 1234, "avg_file_loc": 78,
+            "test_files": 2, "test_loc": 555, "test_ratio": 0.45}
+    git = {"commits": 42, "contributors": 3, "first_commit": "2026-01-01",
+           "last_commit": "2026-07-24", "recent_commits_30d": 5,
+           "current_version": "v0.5.0", "dirty": True}
+    lines = yread._summary_profile_lines(meta, profile, code=code, git=git)
+    text = "\n".join(lines)
+    assert "| Code | 1,234 loc · avg 78/file · tests 555 (0.45x) |" in text
+    assert "| Git | 42 commits · 3 contributors · 2026-01-01→2026-07-24 · 5 in 30d · v0.5.0 · dirty |" in text
 
 
 def test_summary_includes_model_inventory(tmp_path: Path) -> None:
@@ -235,7 +257,8 @@ def test_summary_includes_model_inventory(tmp_path: Path) -> None:
               "kind": "overview", "level": "Beginner", "evidenceFiles": ["README.md"]}]
     profile = yread.ProjectProfile(
         total_files=3, source_files=1, primary_languages=["Python"], max_depth=2,
-        has_readme=True, has_tests=False, has_ci=False, package_files=[], entry_points=[],
+        has_readme=True, has_tests=False, has_ci=False, package_files=["pyproject.toml"],
+        entry_points=["src/app/main.py"], config_files=1,
         models=[{"name": "qwen3-vl", "dir": "models/qwen3-vl",
                  "arch": "Qwen3VLForConditionalGeneration",
                  "formats": [".safetensors"], "config": "models/qwen3-vl/config.json"}],
@@ -243,6 +266,10 @@ def test_summary_includes_model_inventory(tmp_path: Path) -> None:
     yread.write_wiki_index(output_root, pages, "run1", datetime.now(timezone.utc),
                            "zh", "brief", profile, {}, source_root=tmp_path / "repo", mode="ml")
     summary = (output_root / "SUMMARY.md").read_text()
+    assert "| Languages | Python |" in summary
+    assert "| Packages | pyproject.toml |" in summary
+    assert "| Entry points | src/app/main.py |" in summary
+    assert "| Assets | 1 configs |" in summary
     assert "**Models**" in summary
     assert "| qwen3-vl | Qwen3VLForConditionalGeneration | .safetensors |" in summary
 
@@ -786,6 +813,40 @@ def test_asset_inventory_buckets(tmp_path: Path) -> None:
     assert inv["configs"]["files"] == 1
     assert inv["data"]["files"] == 1
     assert "core.py" not in str(inv)
+
+
+# --------------------------------------------------------------------------- #
+# Viewer — select-to-explain                                                   #
+# --------------------------------------------------------------------------- #
+
+def test_explain_assets_reflects_enabled_flag() -> None:
+    on = viewer.explain_assets(True)
+    off = viewer.explain_assets(False)
+    assert "yr-ebtn" in on and "yr-ebub" in on
+    assert "if(!true)" in on
+    assert "if(!false)" in off
+    # The page template accepts the scripts slot alongside its other placeholders.
+    page = viewer.PAGE.format(title="T", nav="N", body="B", scripts=on)
+    assert "yr-ebtn" in page and "<title>T · yread</title>" in page
+
+
+def test_generate_explanation_renders_markdown() -> None:
+    from types import SimpleNamespace
+
+    captured: dict = {}
+
+    def create(model, messages):
+        captured["model"] = model
+        captured["messages"] = messages
+        msg = SimpleNamespace(content="**ViT** is a *Vision Transformer*.")
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    html = viewer.generate_explanation(client, "m1", "zh", "ViT")
+    assert "<strong>ViT</strong>" in html and "<em>Vision Transformer</em>" in html
+    assert captured["model"] == "m1"
+    assert "Chinese" in captured["messages"][0]["content"]  # lang code -> readable name
+    assert captured["messages"][1]["content"] == "ViT"
 
 
 def test_build_profile_populates_ml_fields(tmp_path: Path) -> None:

@@ -1737,19 +1737,66 @@ def lang_name(doc_lang: str) -> str:
     return {"zh": "Chinese", "en": "English"}.get(lang_code(doc_lang), doc_lang)
 
 
-def _summary_profile_lines(profile: ProjectProfile) -> list[str]:
-    """A compact at-a-glance header for SUMMARY.md, built only from the already
-    computed profile (no extra I/O). Surfaces the model inventory that otherwise
-    lives buried in wiki.json, so opening SUMMARY.md shows what the repo is made
-    of before the page list."""
-    facts: list[str] = []
+def _summary_profile_lines(meta: dict, profile: ProjectProfile,
+                           code: dict | None = None, git: dict | None = None) -> list[str]:
+    """The at-a-glance header for SUMMARY.md, built from the wiki meta, the
+    already-computed profile, and — when the source repo is available — its code
+    line counts and local git activity. Surfaces the run metadata (timestamp,
+    mode, depth, language) plus the full project profile, including the model
+    inventory, that otherwise lives buried in wiki.json. ``code``/``git`` are the
+    ``code_stats``/``git_stats`` dicts, or None to omit those rows."""
+    gen = str(meta.get("generated_at", ""))
+    ts = f"{gen[:16].replace('T', ' ')} UTC" if len(gen) >= 16 else gen
+    meta_bits = [b for b in (
+        f"Generated **{ts}**" if ts else "",
+        f"run `{meta.get('id', '')}`" if meta.get("id") else "",
+        f"`{meta.get('mode', '')}`" if meta.get("mode") else "",
+        f"`{meta.get('depth', '')}`" if meta.get("depth") else "",
+        f"`{meta.get('language', '')}`" if meta.get("language") else "",
+    ) if b]
+
+    rows: list[tuple[str, str]] = []
     if profile.primary_languages:
-        facts.append(", ".join(profile.primary_languages))
-    facts.append(f"{profile.source_files} source · {profile.total_files} files")
-    tags = [name for name, on in (("tests", profile.has_tests), ("CI", profile.has_ci)) if on]
-    if tags:
-        facts.append(" · ".join(tags))
-    lines = [f"> {'  ·  '.join(facts)}"] if facts else []
+        rows.append(("Languages", ", ".join(profile.primary_languages)))
+    rows.append(("Files", f"{profile.source_files} source · {profile.total_files} total · max depth {profile.max_depth}"))
+    if code and code.get("core_files"):
+        loc = f"{code['core_loc']:,} loc"
+        if code.get("avg_file_loc"):
+            loc += f" · avg {code['avg_file_loc']}/file"
+        if code.get("test_files"):
+            loc += f" · tests {code['test_loc']:,} ({code['test_ratio']:.2f}x)"
+        rows.append(("Code", loc))
+    signals = [n for n, on in (("README", profile.has_readme), ("tests", profile.has_tests), ("CI", profile.has_ci)) if on]
+    if signals:
+        rows.append(("Signals", " · ".join(signals)))
+    if profile.package_files:
+        rows.append(("Packages", ", ".join(profile.package_files)))
+    if profile.entry_points:
+        rows.append(("Entry points", ", ".join(profile.entry_points)))
+    assets = [f"{c} {label}" for c, label in (
+        (profile.model_files, "weights"), (profile.config_files, "configs"), (profile.data_files, "data")) if c]
+    if assets:
+        rows.append(("Assets", " · ".join(assets)))
+    if git:
+        gparts = [f"{git['commits']} commits"]
+        if git.get("contributors"):
+            gparts.append(f"{git['contributors']} contributors")
+        if git.get("first_commit") and git.get("last_commit"):
+            gparts.append(f"{git['first_commit']}→{git['last_commit']}")
+        gparts.append(f"{git['recent_commits_30d']} in 30d")
+        if git.get("current_version"):
+            gparts.append(git["current_version"])
+        if git.get("dirty"):
+            gparts.append("dirty")
+        rows.append(("Git", " · ".join(gparts)))
+    if meta.get("source_root"):
+        rows.append(("Source", str(meta["source_root"])))
+
+    lines: list[str] = []
+    if meta_bits:
+        lines.append("> " + " · ".join(meta_bits))
+    lines += ["", "**Profile**", "", "| Field | Value |", "| --- | --- |"]
+    lines += [f"| {k} | {v} |" for k, v in rows]
     if profile.models:
         lines += ["", "**Models**", "", "| Model | Architecture | Formats |", "| --- | --- | --- |"]
         for m in profile.models:
@@ -1788,11 +1835,13 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
     (output_root / "wiki.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    code = git = None
+    if source_root and Path(source_root).is_dir():
+        code = code_stats(source_root)
+        git = git_stats(source_root)
     summary = ["# Wiki\n"]
-    overview = _summary_profile_lines(profile)
-    if overview:
-        summary.extend(overview)
-        summary.append("")
+    summary.extend(_summary_profile_lines(meta, profile, code=code, git=git))
+    summary.append("")
     last_section = last_group = None
     for p in pages:
         if p["section"] != last_section:

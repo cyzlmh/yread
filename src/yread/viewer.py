@@ -10,10 +10,10 @@ wiki.json, and resolves the inter-page `[title](slug)` cross-links. The source
 repo recorded in wiki.json (`source_root`) makes `Sources: [file](path#Lx-Ly)`
 citations link to the real files; pass --repo to override it.
 """
+import json
 import re
 import sys
 import webbrowser
-from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -22,6 +22,29 @@ import markdown
 
 
 SENSITIVE_SOURCE_NAMES = {".env", ".env.local", ".npmrc", ".pypirc", ".netrc", "auth.json", "credentials.json"}
+
+# Select-to-explain: a reader selects jargon (ViT, M-RoPE, ...) and gets a short
+# generic explanation from the LLM configured in ~/.yread/config.env. Kept simple
+# on purpose — the term alone, no repo context, one shot, cached per term.
+LANG_NAMES = {"zh": "Chinese", "en": "English"}
+EXPLAIN_SYSTEM = (
+    "You explain a technical term for a developer reading project documentation. "
+    "Given the term, give a concise 2-4 sentence explanation of what it is and why it "
+    "matters. Answer in {lang}. Plain prose; inline code for names/APIs is fine. Do "
+    "not ask questions, add a preamble, or restate the term as a heading."
+)
+
+
+def generate_explanation(client, model: str, lang: str, term: str) -> str:
+    """Ask the configured LLM for a short, generic explanation of ``term`` and
+    return it as rendered HTML."""
+    messages = [
+        {"role": "system", "content": EXPLAIN_SYSTEM.format(lang=LANG_NAMES.get(lang, lang or "English"))},
+        {"role": "user", "content": term},
+    ]
+    resp = client.chat.completions.create(model=model, messages=messages)
+    text = (resp.choices[0].message.content or "").strip()
+    return markdown.markdown(text, extensions=["fenced_code"])
 
 
 def _resolve_versioned_wiki(root: Path) -> Path | None:
@@ -76,7 +99,56 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .mermaid{{background:var(--side);border-radius:8px;padding:14px;margin:16px 0;text-align:center}}
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
-</style></head><body><div class="wrap"><nav>{nav}</nav><main>{body}</main></div></body></html>"""
+ #yr-ebtn{{position:absolute;z-index:60;display:none;padding:3px 11px;font:12.5px/1.4 inherit;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)}}
+ #yr-ebub{{position:absolute;z-index:61;display:none;max-width:340px;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 30px 12px 14px;font-size:13.5px;line-height:1.6}}
+ #yr-ebub h4{{margin:0 0 6px;font-size:12.5px;color:var(--muted);font-weight:600}}
+ #yr-ebub .yr-body p{{margin:.35em 0}} #yr-ebub .yr-body code{{font-size:85%}}
+ #yr-ebub .yr-x{{position:absolute;top:5px;right:9px;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}}
+</style></head><body><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
+
+
+EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
+<script>
+(function(){
+  if(!__ENABLED__) return;
+  var main=document.querySelector('main');
+  var btn=document.getElementById('yr-ebtn'), bub=document.getElementById('yr-ebub'), term='';
+  function esc(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function hideBtn(){btn.style.display='none';}
+  function hideBub(){bub.style.display='none';}
+  function place(el,r){el.style.left=(window.scrollX+r.left)+'px';el.style.top=(window.scrollY+r.bottom+6)+'px';}
+  main.addEventListener('mouseup',function(){
+    setTimeout(function(){
+      var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
+      if(!t||t.length>200||!sel.rangeCount){hideBtn();return;}
+      term=t; place(btn,sel.getRangeAt(0).getBoundingClientRect()); btn.style.display='block';
+    },10);
+  });
+  document.addEventListener('mousedown',function(e){
+    if(e.target!==btn&&!bub.contains(e.target)) hideBub();
+    if(e.target!==btn) hideBtn();
+  });
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){hideBtn();hideBub();}});
+  btn.addEventListener('click',function(){
+    var sel=window.getSelection();
+    var r=(sel&&sel.rangeCount)?sel.getRangeAt(0).getBoundingClientRect():btn.getBoundingClientRect();
+    bub.innerHTML='<span class="yr-x">×</span><h4>'+esc(term)+'</h4><div class="yr-body">…</div>';
+    place(bub,r); bub.style.display='block'; hideBtn();
+    bub.querySelector('.yr-x').onclick=hideBub;
+    var body=bub.querySelector('.yr-body');
+    fetch('/explain',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({term:term})})
+      .then(function(res){return res.json();})
+      .then(function(d){body.innerHTML=d.html||esc(d.error||'（无结果）');})
+      .catch(function(err){body.textContent='请求失败：'+err;});
+  });
+})();
+</script>"""
+
+
+def explain_assets(enabled: bool) -> str:
+    """The select-to-explain button/bubble markup + JS, with the feature flag
+    baked in. When disabled the script returns early and no requests are made."""
+    return EXPLAIN_ASSETS.replace("__ENABLED__", "true" if enabled else "false")
 
 
 def build_nav(pages, active):
@@ -129,6 +201,7 @@ def safe_source_path(repo: Path, rel: str) -> Path | None:
 
 class Handler(BaseHTTPRequestHandler):
     wiki: Path; pages: list; byslug: dict; repo: Path | None
+    settings = None; client = None; lang = "en"; explain_cache: dict = {}
 
     def log_message(self, *a): pass
 
@@ -136,6 +209,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
+
+    def _send_json(self, obj: dict, code=200):
+        self._send(json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8", code)
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/explain":
+            return self._send_json({"error": "not found"}, code=404)
+        if not (self.settings and self.client):
+            return self._send_json({"error": "未配置模型（~/.yread/config.env）"})
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        try:
+            term = (json.loads(self.rfile.read(length) or b"{}").get("term") or "").strip()
+        except (ValueError, OSError):
+            term = ""
+        if not term or len(term) > 200:
+            return self._send_json({"error": "无效选区"})
+        cached = self.explain_cache.get(term.lower())
+        if cached is not None:
+            return self._send_json({"html": cached})
+        try:
+            html = generate_explanation(self.client, self.settings.model, self.lang, term)
+        except Exception as e:  # noqa: BLE001 — surface the failure to the bubble, don't crash the server
+            return self._send_json({"error": f"生成失败：{e}"})
+        self.explain_cache[term.lower()] = html
+        self._send_json({"html": html})
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -156,13 +254,13 @@ class Handler(BaseHTTPRequestHandler):
             slugs = set(self.byslug)
             html = PAGE.format(title=p["title"],
                                nav=build_nav(self.pages, slug),
-                               body=render_body(md_text, slugs, self.repo))
+                               body=render_body(md_text, slugs, self.repo),
+                               scripts=explain_assets(bool(self.settings and self.client)))
             return self._send(html.encode())
         self._send(b"not found", code=404)
 
 
-def main(argv: list[str] | None = None):
-    import json
+def main(argv: list[str] | None = None, settings=None):
     args = [a for a in (sys.argv[1:] if argv is None else argv)]
     host = "localhost"; port = 8000; repo = None; wiki_arg = None
     i = 0
@@ -183,8 +281,16 @@ def main(argv: list[str] | None = None):
     Handler.wiki, Handler.pages = wiki, pages
     Handler.byslug = {p["slug"]: p for p in pages}
     Handler.repo = repo
+    Handler.lang = meta.get("language", "en")
+    Handler.explain_cache = {}
+    Handler.settings = settings
+    if settings:
+        from openai import OpenAI
+        Handler.client = OpenAI(base_url=settings.base_url, api_key=settings.api_key,
+                                max_retries=1, timeout=40)
+    explain = " · select-to-explain on" if settings else ""
     url = f"http://{host}:{port}/"
-    print(f"yread browser: {wiki}\n  {len(pages)} pages -> {url}  (Ctrl-C to stop)", flush=True)
+    print(f"yread browser: {wiki}\n  {len(pages)} pages -> {url}{explain}  (Ctrl-C to stop)", flush=True)
     try: webbrowser.open(url)
     except Exception: pass
     ThreadingHTTPServer((host, port), Handler).serve_forever()
