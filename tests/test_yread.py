@@ -822,12 +822,12 @@ def test_asset_inventory_buckets(tmp_path: Path) -> None:
 def test_explain_assets_reflects_enabled_flag() -> None:
     on = viewer.explain_assets(True)
     off = viewer.explain_assets(False)
-    assert "yr-ebtn" in on and "yr-ebub" in on
+    assert "yr-ebub" in on and "提问" in on  # prompt box + ask button, no auto-run
     assert "if(!true)" in on
     assert "if(!false)" in off
     # The page template accepts the scripts slot alongside its other placeholders.
     page = viewer.PAGE.format(title="T", nav="N", body="B", scripts=on)
-    assert "yr-ebtn" in page and "<title>T · yread</title>" in page
+    assert "yr-ebub" in page and "<title>T · yread</title>" in page
 
 
 def test_page_scripts_and_sidebar_toggle() -> None:

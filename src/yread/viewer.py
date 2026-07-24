@@ -95,12 +95,11 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  main img{{max-width:100%;cursor:zoom-in}}
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
- #yr-ebtn{{position:absolute;z-index:60;display:none;padding:3px 11px;font:12.5px/1.4 inherit;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)}}
  #yr-ebub{{position:absolute;z-index:61;display:none;width:360px;max-width:92vw;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13.5px;line-height:1.6}}
- #yr-ebub .yr-ctx{{font-size:12px;color:var(--muted);background:var(--side);border-radius:6px;padding:5px 22px 5px 8px;margin:0 0 8px;max-height:52px;overflow:auto}}
- #yr-ebub .yr-body{{max-height:300px;overflow:auto}}
+ #yr-ebub .yr-body{{max-height:300px;overflow:auto;margin-top:8px}}
+ #yr-ebub .yr-body:empty{{display:none}}
  #yr-ebub .yr-a p{{margin:.35em 0}} #yr-ebub .yr-a code{{font-size:85%}}
- #yr-ebub .yr-ask{{display:flex;gap:6px;margin-top:10px}}
+ #yr-ebub .yr-ask{{display:flex;gap:6px;margin-top:2px}}
  #yr-ebub .yr-ask input{{flex:1;min-width:0;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:12.5px;background:var(--bg);color:var(--fg)}}
  #yr-ebub .yr-ask button{{border:none;background:var(--accent);color:#fff;border-radius:6px;padding:0 11px;cursor:pointer;font-size:14px}}
  #yr-ebub .yr-x{{position:absolute;top:5px;right:9px;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}}
@@ -120,65 +119,51 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 </style></head><body><button id="yr-menu" aria-label="目录">☰</button><div id="yr-backdrop"></div><div id="yr-zoom"><div class="yr-zoom-inner"></div></div><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
 
 
-EXPLAIN_ASSETS = """<button id="yr-ebtn">解释</button><div id="yr-ebub"></div>
+EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
 <script>
 (function(){
   if(!__ENABLED__) return;
-  var main=document.querySelector('main');
-  var btn=document.getElementById('yr-ebtn'), bub=document.getElementById('yr-ebub'), term='';
+  var main=document.querySelector('main'), bub=document.getElementById('yr-ebub'), term='', LS='yr_explain_prompt';
   function esc(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-  function hideBtn(){btn.style.display='none';}
-  function hideBub(){bub.style.display='none';}
-  function place(el,r){el.style.left=(window.scrollX+r.left)+'px';el.style.top=(window.scrollY+r.bottom+6)+'px';}
-  function trySelect(){
-    setTimeout(function(){
-      var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
-      if(!t||t.length>2000||!sel.rangeCount){hideBtn();return;}
-      var r=sel.getRangeAt(0).getBoundingClientRect();
-      if(!r.width&&!r.height){hideBtn();return;}
-      term=t; place(btn,r); btn.style.display='block';
-    },10);
-  }
-  main.addEventListener('mouseup',trySelect);       // desktop
-  main.addEventListener('touchend',trySelect);      // mobile: tap-drag select
-  var selTimer=null;                                // mobile: handle bars often fire only selectionchange
-  document.addEventListener('selectionchange',function(){clearTimeout(selTimer);selTimer=setTimeout(trySelect,300);});
-  function dismiss(e){
-    var hasSel=((window.getSelection()||'')+'').trim().length>0;
-    if(e.target!==btn&&!bub.contains(e.target)) hideBub();
-    // keep the button while a selection is live so the synthesized post-touch
-    // mousedown doesn't hide what the user just selected
-    if(e.target!==btn&&!hasSel) hideBtn();
-  }
-  document.addEventListener('mousedown',dismiss);
-  document.addEventListener('touchstart',dismiss);
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){hideBtn();hideBub();}});
-  var LS='yr_explain_prompt';
-  function savedPrompt(){ try{return localStorage.getItem(LS)||'';}catch(e){return '';} }
-  function run(promptVal){
+  function saved(){ try{return localStorage.getItem(LS)||'';}catch(e){return '';} }
+  function hide(){ bub.style.display='none'; }
+  function run(p){
     var body=bub.querySelector('.yr-body'); body.innerHTML='<div class="yr-a">…</div>';
     var a=body.querySelector('.yr-a');
     fetch('/explain',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({term:term,prompt:promptVal||''})})
+      body:JSON.stringify({term:term,prompt:p||''})})
       .then(function(res){return res.json();})
       .then(function(d){a.innerHTML=d.html||esc(d.error||'（无结果）');})
       .catch(function(err){a.textContent='请求失败：'+err;});
   }
-  btn.addEventListener('click',function(){
-    var sel=window.getSelection();
-    var r=(sel&&sel.rangeCount)?sel.getRangeAt(0).getBoundingClientRect():btn.getBoundingClientRect();
-    var head=term.length>140?term.slice(0,140)+'…':term;
-    var p=savedPrompt()||(window.YR_DEFAULT_PROMPT||'');
-    bub.innerHTML='<span class="yr-x">×</span><div class="yr-ctx">'+esc(head)+'</div>'
-      +'<div class="yr-body"></div>'
-      +'<form class="yr-ask"><input class="yr-prompt" value="'+esc(p)+'" placeholder="解释提示词（可编辑，回车重新解释）" maxlength="1000"><button type="submit">解释</button></form>';
-    place(bub,r); bub.style.display='block'; hideBtn();
-    bub.querySelector('.yr-x').onclick=hideBub;
-    var form=bub.querySelector('.yr-ask'), inp=form.querySelector('.yr-prompt');
-    // editing the prompt + submitting re-runs and remembers it as the new default
-    form.addEventListener('submit',function(e){e.preventDefault(); var v=inp.value.trim(); try{localStorage.setItem(LS,v);}catch(_){}; run(v);});
-    run(p);            // auto-run with the current (saved or default) prompt
-  });
+  // On selection show the prompt box + button. No request is made until the user
+  // clicks 提问; there is no follow-up — close (× / click away / Esc) dismisses it.
+  function open(r){
+    var p=saved()||(window.YR_DEFAULT_PROMPT||'');
+    bub.innerHTML='<span class="yr-x">×</span>'
+      +'<form class="yr-ask"><input class="yr-prompt" value="'+esc(p)+'" placeholder="提示词（可编辑）" maxlength="1000"><button type="submit">提问</button></form>'
+      +'<div class="yr-body"></div>';
+    bub.style.left=(window.scrollX+r.left)+'px'; bub.style.top=(window.scrollY+r.bottom+6)+'px';
+    bub.style.display='block';
+    bub.querySelector('.yr-x').onclick=hide;
+    var inp=bub.querySelector('.yr-prompt');
+    bub.querySelector('.yr-ask').addEventListener('submit',function(e){
+      e.preventDefault(); var v=inp.value.trim(); try{localStorage.setItem(LS,v);}catch(_){}; run(v);
+    });
+  }
+  function onSelect(){
+    setTimeout(function(){
+      var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
+      if(!t||t.length>2000||!sel.rangeCount) return;
+      var r=sel.getRangeAt(0).getBoundingClientRect();
+      if(r.width||r.height){ term=t; open(r); }
+    },10);
+  }
+  main.addEventListener('mouseup',onSelect);   // desktop
+  main.addEventListener('touchend',onSelect);  // mobile: tap-drag select
+  document.addEventListener('mousedown',function(e){ if(!bub.contains(e.target)) hide(); });
+  document.addEventListener('touchstart',function(e){ if(!bub.contains(e.target)) hide(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') hide(); });
 })();
 </script>"""
 
