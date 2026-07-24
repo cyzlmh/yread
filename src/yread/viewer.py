@@ -96,7 +96,9 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
  #yr-ebub{{position:absolute;z-index:61;display:none;width:360px;max-width:92vw;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13.5px;line-height:1.6}}
+ #yr-ebub.yr-docked{{position:fixed;inset:0 0 0 auto;width:360px;max-width:90vw;height:100vh;border:none;border-left:1px solid var(--line);border-radius:0;box-shadow:-2px 0 16px rgba(0,0,0,.08);padding:44px 16px 16px;overflow:auto}}
  #yr-ebub .yr-body{{max-height:300px;overflow:auto;margin-top:8px}}
+ #yr-ebub.yr-docked .yr-body{{max-height:none}}
  #yr-ebub .yr-body:empty{{display:none}}
  #yr-ebub .yr-a p{{margin:.35em 0}} #yr-ebub .yr-a code{{font-size:85%}}
  #yr-ebub .yr-ask{{display:flex;gap:6px;margin-top:2px}}
@@ -143,7 +145,11 @@ EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
     bub.innerHTML='<span class="yr-x">×</span>'
       +'<form class="yr-ask"><input class="yr-prompt" value="'+esc(p)+'" placeholder="提示词（可编辑）" maxlength="1000"><button type="submit">提问</button></form>'
       +'<div class="yr-body"></div>';
-    bub.style.left=(window.scrollX+r.left)+'px'; bub.style.top=(window.scrollY+r.bottom+6)+'px';
+    if(window.matchMedia('(min-width:1100px)').matches){
+      bub.className='yr-docked'; bub.style.left=''; bub.style.top='';           // wide: dock to the right
+    }else{
+      bub.className=''; bub.style.left=(window.scrollX+r.left)+'px'; bub.style.top=(window.scrollY+r.bottom+6)+'px';  // narrow: bubble at selection
+    }
     bub.style.display='block';
     bub.querySelector('.yr-x').onclick=hide;
     var inp=bub.querySelector('.yr-prompt');
@@ -161,9 +167,7 @@ EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
   }
   main.addEventListener('mouseup',onSelect);   // desktop
   main.addEventListener('touchend',onSelect);  // mobile: tap-drag select
-  document.addEventListener('mousedown',function(e){ if(!bub.contains(e.target)) hide(); });
-  document.addEventListener('touchstart',function(e){ if(!bub.contains(e.target)) hide(); });
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape') hide(); });
+  // dismissed only by the × button — clicking elsewhere no longer closes it
 })();
 </script>"""
 
