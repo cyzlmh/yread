@@ -23,43 +23,6 @@ import markdown
 
 SENSITIVE_SOURCE_NAMES = {".env", ".env.local", ".npmrc", ".pypirc", ".netrc", "auth.json", "credentials.json"}
 
-# Select-to-explain: a reader selects text (a term or a passage) and gets an
-# explanation from the LLM configured in ~/.yread/config.env. The instruction that
-# drives the explanation is customizable — editable in the popover and remembered
-# in the browser — with EXPLAIN_SYSTEM / DEFAULT_EXPLAIN_PROMPT as the built-in default.
-LANG_NAMES = {"zh": "Chinese", "en": "English"}
-MAX_SELECTION = 2000  # chars — a term or a paragraph, but not a whole page
-EXPLAIN_SYSTEM = (
-    "You explain a technical term or passage for a developer reading project "
-    "documentation. Give a concise 2-4 sentence explanation of what it is and why it "
-    "matters. Answer in {lang}. Plain prose; inline code for names/APIs is fine. Do "
-    "not add a preamble or restate the selection as a heading."
-)
-DEFAULT_EXPLAIN_PROMPT = {
-    "zh": "简明解释选中的内容（2-4 句）：它是什么、为什么重要。",
-    "en": "Concisely explain the selection (2-4 sentences): what it is and why it matters.",
-}
-
-
-def default_explain_prompt(lang: str) -> str:
-    return DEFAULT_EXPLAIN_PROMPT.get(lang, DEFAULT_EXPLAIN_PROMPT["en"])
-
-
-def generate_explanation(client, model: str, lang: str, term: str, prompt: str = "") -> str:
-    """Explain the selected ``term`` text. ``prompt`` is the (user-customizable)
-    instruction; when empty the built-in default explanation prompt is used.
-    Returns rendered HTML."""
-    lang_name = LANG_NAMES.get(lang, lang or "English")
-    if prompt:
-        system = (f"{prompt}\n\nAnswer in {lang_name}. Be concise; plain prose, inline "
-                  "code for names/APIs is fine; no preamble.")
-    else:
-        system = EXPLAIN_SYSTEM.format(lang=lang_name)
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": term}]
-    resp = client.chat.completions.create(model=model, messages=messages)
-    text = (resp.choices[0].message.content or "").strip()
-    return markdown.markdown(text, extensions=["fenced_code"])
-
 
 def resolve_wiki(arg: str | None) -> Path:
     root = Path(arg).resolve() if arg else Path(".yread").resolve()
@@ -95,17 +58,6 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  main img{{max-width:100%;cursor:zoom-in}}
  h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
  blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
- #yr-ebub{{display:none;position:fixed;z-index:61;background:var(--bg);font-size:13.5px;line-height:1.7;overflow:auto}}
- #yr-ebub .yr-body{{overflow:auto;margin-top:10px}}
- #yr-ebub .yr-body:empty{{display:none}}
- #yr-ebub .yr-a p{{margin:.4em 0}} #yr-ebub .yr-a code{{font-size:85%}}
- #yr-ebub .yr-ask{{display:flex;gap:8px}}
- #yr-ebub .yr-ask input{{flex:1;min-width:0;border:1px solid var(--line);border-radius:7px;padding:7px 10px;font:inherit;font-size:13px;background:var(--bg);color:var(--fg)}}
- #yr-ebub .yr-ask button{{border:none;background:var(--accent);color:#fff;border-radius:7px;padding:0 16px;cursor:pointer;font-size:14px}}
- #yr-ebub .yr-x{{position:absolute;top:6px;right:10px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;color:var(--muted);cursor:pointer;font-size:20px;line-height:1;border-radius:7px}}
- #yr-ebub .yr-x:hover{{background:var(--side)}}
- @media (min-width:1100px){{ #yr-ebub{{top:0;right:0;bottom:0;width:370px;max-width:90vw;border-left:1px solid var(--line);box-shadow:-2px 0 16px rgba(0,0,0,.08);padding:48px 18px 18px}} }}
- @media (max-width:1099px){{ #yr-ebub{{left:0;right:0;bottom:0;max-height:72vh;border-top:1px solid var(--line);border-radius:16px 16px 0 0;box-shadow:0 -4px 24px rgba(0,0,0,.18);padding:44px 16px calc(18px + env(safe-area-inset-bottom))}} }}
  #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
  #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:64}}
  #yr-zoom{{display:none;position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.82);align-items:center;justify-content:center;padding:24px;cursor:zoom-out}}
@@ -122,62 +74,7 @@ PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 </style></head><body><button id="yr-menu" aria-label="目录">☰</button><div id="yr-backdrop"></div><div id="yr-zoom"><div class="yr-zoom-inner"></div></div><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
 
 
-EXPLAIN_ASSETS = """<div id="yr-ebub"></div>
-<script>
-(function(){
-  if(!__ENABLED__) return;
-  var main=document.querySelector('main'), bub=document.getElementById('yr-ebub'), term='', LS='yr_explain_prompt';
-  function esc(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-  function saved(){ try{return localStorage.getItem(LS)||'';}catch(e){return '';} }
-  function hide(){ bub.style.display='none'; try{window.getSelection().removeAllRanges();}catch(_){} }
-  function run(p){
-    var body=bub.querySelector('.yr-body'); body.innerHTML='<div class="yr-a">…</div>';
-    var a=body.querySelector('.yr-a');
-    fetch('/explain',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({term:term,prompt:p||''})})
-      .then(function(res){return res.json();})
-      .then(function(d){a.innerHTML=d.html||esc(d.error||'（无结果）');})
-      .catch(function(err){a.textContent='请求失败：'+err;});
-  }
-  // On selection show the prompt box + button. No request until the user clicks
-  // 提问; no follow-up. The panel is fixed (docked right on wide screens, a bottom
-  // sheet on narrow ones) so it stays put on scroll, and only the × button closes it.
-  function open(){
-    var p=saved()||(window.YR_DEFAULT_PROMPT||'');
-    bub.innerHTML='<span class="yr-x">×</span>'
-      +'<form class="yr-ask"><input class="yr-prompt" value="'+esc(p)+'" placeholder="提示词（可编辑）" maxlength="1000"><button type="submit">提问</button></form>'
-      +'<div class="yr-body"></div>';
-    bub.style.display='block';
-    bub.querySelector('.yr-x').onclick=hide;
-    var inp=bub.querySelector('.yr-prompt');
-    bub.querySelector('.yr-ask').addEventListener('submit',function(e){
-      e.preventDefault(); var v=inp.value.trim(); try{localStorage.setItem(LS,v);}catch(_){}; run(v);
-    });
-  }
-  function onSelect(){
-    setTimeout(function(){
-      var sel=window.getSelection(), t=(sel?sel.toString():'').trim();
-      if(!t||t.length>2000||!sel.rangeCount) return;
-      if(bub.style.display==='block'&&t===term) return;   // already open for this selection
-      term=t; open();
-    },10);
-  }
-  main.addEventListener('mouseup',onSelect);    // desktop
-  main.addEventListener('touchend',onSelect);   // mobile: tap-drag select
-  var selTimer=null;                            // iOS often finalizes selection via selectionchange
-  document.addEventListener('selectionchange',function(){clearTimeout(selTimer);selTimer=setTimeout(onSelect,250);});
-})();
-</script>"""
-
-
-def explain_assets(enabled: bool) -> str:
-    """The select-to-explain button/bubble markup + JS, with the feature flag
-    baked in. When disabled the script returns early and no requests are made."""
-    return EXPLAIN_ASSETS.replace("__ENABLED__", "true" if enabled else "false")
-
-
-# Sidebar drawer toggle. Always runs (independent of select-to-explain) so the
-# hamburger works on mobile even when no LLM is configured.
+# Sidebar drawer toggle plus click-to-zoom for diagrams and images.
 LAYOUT_JS = """<script>
 (function(){
   var m=document.getElementById('yr-menu'), b=document.getElementById('yr-backdrop'), nav=document.querySelector('nav');
@@ -202,13 +99,6 @@ LAYOUT_JS = """<script>
   }
 })();
 </script>"""
-
-
-def page_scripts(explain_enabled: bool, lang: str = "en") -> str:
-    """All page-level scripts: the injected default explain prompt, the always-on
-    sidebar/zoom layout script, and the optional select-to-explain layer."""
-    prompt_js = f"<script>window.YR_DEFAULT_PROMPT={json.dumps(default_explain_prompt(lang))};</script>"
-    return prompt_js + LAYOUT_JS + explain_assets(explain_enabled)
 
 
 def build_nav(pages, active, on_home=False):
@@ -283,7 +173,6 @@ def build_profile_html(meta: dict, repo: Path | None, name: str) -> str | None:
 
 class Handler(BaseHTTPRequestHandler):
     wiki: Path; pages: list; byslug: dict; repo: Path | None
-    settings = None; client = None; lang = "en"; explain_cache: dict = {}
     home_body = None; home_title = "Wiki"
 
     def log_message(self, *a): pass
@@ -293,42 +182,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, obj: dict, code=200):
-        self._send(json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8", code)
-
-    def do_POST(self):
-        if self.path.split("?")[0] != "/explain":
-            return self._send_json({"error": "not found"}, code=404)
-        if not (self.settings and self.client):
-            return self._send_json({"error": "未配置模型（~/.yread/config.env）"})
-        length = int(self.headers.get("Content-Length", "0") or 0)
-        try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            term = (payload.get("term") or "").strip()
-            prompt = (payload.get("prompt") or "").strip()[:1000]
-        except (ValueError, OSError):
-            term, prompt = "", ""
-        if not term or len(term) > MAX_SELECTION:
-            return self._send_json({"error": "无效选区"})
-        key = f"{prompt}\n##\n{term}".lower()
-        cached = self.explain_cache.get(key)
-        if cached is not None:
-            return self._send_json({"html": cached})
-        try:
-            html = generate_explanation(self.client, self.settings.model, self.lang, term, prompt)
-        except Exception as e:  # noqa: BLE001 — surface the failure to the bubble, don't crash the server
-            return self._send_json({"error": f"生成失败：{e}"})
-        self.explain_cache[key] = html
-        self._send_json({"html": html})
-
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/":
             if self.home_body is not None:
                 html = PAGE.format(title=self.home_title,
                                    nav=build_nav(self.pages, None, on_home=True),
-                                   body=self.home_body,
-                                   scripts=page_scripts(bool(self.settings and self.client), self.lang))
+                                   body=self.home_body, scripts=LAYOUT_JS)
                 return self._send(html.encode())
             # No reconstructable profile: fall back to the first page. Slugs keep
             # CJK/Unicode; HTTP headers are latin-1, so the target must be encoded.
@@ -350,12 +210,12 @@ class Handler(BaseHTTPRequestHandler):
             html = PAGE.format(title=p["title"],
                                nav=build_nav(self.pages, slug),
                                body=render_body(md_text, slugs, self.repo),
-                               scripts=page_scripts(bool(self.settings and self.client), self.lang))
+                               scripts=LAYOUT_JS)
             return self._send(html.encode())
         self._send(b"not found", code=404)
 
 
-def main(argv: list[str] | None = None, settings=None):
+def main(argv: list[str] | None = None):
     args = [a for a in (sys.argv[1:] if argv is None else argv)]
     host = "localhost"; port = 8000; repo = None; wiki_arg = None
     i = 0
@@ -377,18 +237,10 @@ def main(argv: list[str] | None = None, settings=None):
     Handler.wiki, Handler.pages = wiki, pages
     Handler.byslug = {p["slug"]: p for p in pages}
     Handler.repo = repo
-    Handler.lang = meta.get("language", "en")
-    Handler.explain_cache = {}
     Handler.home_title = f"{name} · Profile"
     Handler.home_body = build_profile_html(meta, repo, name)
-    Handler.settings = settings
-    if settings:
-        from openai import OpenAI
-        Handler.client = OpenAI(base_url=settings.base_url, api_key=settings.api_key,
-                                max_retries=1, timeout=40)
-    explain = " · select-to-explain on" if settings else ""
     url = f"http://{host}:{port}/"
-    print(f"yread browser: {wiki}\n  {len(pages)} pages -> {url}{explain}  (Ctrl-C to stop)", flush=True)
+    print(f"yread browser: {wiki}\n  {len(pages)} pages -> {url}  (Ctrl-C to stop)", flush=True)
     try: webbrowser.open(url)
     except Exception: pass
     ThreadingHTTPServer((host, port), Handler).serve_forever()

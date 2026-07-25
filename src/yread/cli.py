@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -149,19 +151,6 @@ def _run_config(args: argparse.Namespace) -> int:
     raise SystemExit(f"unknown config command: {command}")
 
 
-def _browse_llm_settings() -> core.LLMSettings | None:
-    """Resolve LLM settings for the viewer's select-to-explain feature from the
-    same config the generate command uses. Missing config just disables the
-    feature — browsing must still work with no API key."""
-    from types import SimpleNamespace
-    fake = SimpleNamespace(env_file=None, depth=None, mode=None, output_dir=None)
-    try:
-        config = core.config_from_args(fake, config_files=[CONFIG_FILE])
-        return core.resolve_provider(config)
-    except SystemExit:
-        return None
-
-
 def _run_browse(args: argparse.Namespace) -> int:
     viewer_args = []
     if args.wiki_dir:
@@ -169,7 +158,7 @@ def _run_browse(args: argparse.Namespace) -> int:
     viewer_args.extend(["--host", args.host, "--port", str(args.port)])
     if args.repo:
         viewer_args.extend(["--repo", args.repo])
-    viewer.main(viewer_args, settings=_browse_llm_settings())
+    viewer.main(viewer_args)
     return 0
 
 
@@ -182,104 +171,202 @@ def _human_bytes(n: int) -> str:
     return f"{size:.1f} TB"
 
 
+# --- profile rendering ------------------------------------------------------
+# A tiny stdlib-only styling layer (no rich dependency). Every line is the same
+# three columns — dim label, right-aligned figure, dim detail — so the numbers
+# stack into one column the eye can scan instead of being spliced into prose
+# ("2,284 loc · 571 avg/file"). Restrained ANSI that degrades to plain text when
+# stdout is piped, NO_COLOR is set, or the terminal is dumb.
+
+_COLOR = False
+_WIDTH_CAP = 64
+_LABEL = 14  # metric name column
+_VALUE = 7   # right-aligned figure column
+_BAR_BLOCKS = " ▏▎▍▌▋▊▉█"
+
+
+def _supports_color() -> bool:
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
+
+def _enable_windows_ansi() -> None:
+    """Turn on virtual-terminal processing so ANSI works in the Win10+ console."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VT_PROCESSING
+    except Exception:  # noqa: BLE001,S110 — best-effort console setup; never block output
+        pass
+
+
+def _paint(code: str, text: str) -> str:
+    # Empty text stays empty: an escape pair around nothing is invisible but still
+    # counts as content, which would keep _row from trimming an absent note.
+    return f"\033[{code}m{text}\033[0m" if _COLOR and text else text
+
+
+def _bold(s: str) -> str:
+    return _paint("1", s)
+
+
+def _dim(s: str) -> str:
+    return _paint("2", s)
+
+
+def _accent(s: str) -> str:
+    return _paint("36", s)  # cyan
+
+
+def _rule_width() -> int:
+    return min(shutil.get_terminal_size((80, 24)).columns, _WIDTH_CAP)
+
+
+def _bar(frac: float, width: int = 20) -> str:
+    eighths = round(frac * width * 8)
+    full, rem = divmod(eighths, 8)
+    return ("█" * full + (_BAR_BLOCKS[rem] if rem else "")).ljust(width)
+
+
+def _clip(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _header(name: str, path: str, desc: str | None) -> None:
+    pad = max(1, _rule_width() - len(name) - len(path))
+    print(f"  {_bold(_accent(name))}{' ' * pad}{_dim(path)}")
+    if desc:
+        print(f"  {_dim(desc)}")
+
+
+def _section(title: str) -> None:
+    print()
+    print(f"  {_bold(title)} {_dim('─' * max(0, _rule_width() - len(title) - 1))}")
+
+
+def _row(label: str, value: str = "", note: str = "") -> None:
+    """One profile row. ``value`` is the bare figure — no units, no punctuation —
+    so a section's numbers line up in a single column; anything qualifying it goes
+    in ``note``, already styled by the caller (dim for asides, plain for names and
+    paths). Rows with nothing to count leave the figure column empty."""
+    line = f"    {_dim(label.ljust(_LABEL))}{value.rjust(_VALUE)}"
+    if note:
+        line = f"{line}    {note}"
+    print(line.rstrip())
+
+
+def _render_languages(langs: list[dict]) -> None:
+    _section("LANGUAGES")
+    if len(langs) == 1:  # a lone language makes a bar and a 100% share redundant
+        _row(_clip(langs[0]["language"], _LABEL), f"{langs[0]['loc']:,}", _dim("loc"))
+        return
+    top = max(s["loc"] for s in langs)
+    total = sum(s["loc"] for s in langs) or 1
+    for s in langs:
+        bar = _accent(_bar(s["loc"] / top, 14)) if top else _bar(0, 14)
+        pct = _dim(f"{round(s['loc'] / total * 100):>3}%")
+        _row(_clip(s["language"], _LABEL), f"{s['loc']:,}", f"{bar} {pct}")
+
+
+def _render_assets(assets: dict) -> None:
+    _section("ASSETS")
+    for bucket in ("weights", "configs", "data"):
+        entry = assets.get(bucket)
+        if not entry:
+            continue
+        exts = " ".join(f"{ext}×{n}" for ext, n in
+                        sorted(entry["exts"].items(), key=lambda kv: (-kv[1], kv[0])))
+        parts = [p for p in ("files", _human_bytes(entry["bytes"]) if entry["bytes"] else "", exts) if p]
+        _row(bucket, f"{entry['files']:,}", _dim(" · ".join(parts)))
+
+
+def _render_models(models: list[dict]) -> None:
+    _section("MODELS")
+    for m in models:
+        fmts = _dim(" · " + " ".join(m["formats"])) if m["formats"] else ""
+        _row(_clip(m["name"], _LABEL), "", f"{_clip(m['arch'] or '?', 30)}{fmts}")
+
+
 def _run_profile(args: argparse.Namespace) -> int:
+    global _COLOR
+    _COLOR = _supports_color()
+    if _COLOR:
+        _enable_windows_ansi()
+
     repo = Path(args.repo_path).resolve()
     profile = core.build_project_profile(repo)
     config = _read_config()
     languages = core.language_stats(repo)
     code = core.code_stats(repo)
+    assets = core.asset_inventory(repo)
+    stats = core.git_stats(repo)
+    gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))
 
-    def row(label: str, value: str) -> None:
-        print(f"{label:<11}{value}")
+    print()
+    _header(repo.name or str(repo), str(repo), gh.get("description") if gh else None)
 
-    row("Project", str(repo))
-    row("Files", f"{code['core_files']} source · {profile.total_files} total · depth {profile.max_depth}")
-
-    code_line = f"{code['core_loc']:,} loc"
-    if code["core_files"]:
-        code_line += f" · avg {code['avg_file_loc']}/file"
+    _section("CODE")
+    _row("Lines of code", f"{code['core_loc']:,}", _dim("excludes blanks and comments"))
+    _row("Source files", f"{code['core_files']:,}",
+         _dim(f"of {profile.total_files:,} files · {profile.max_depth} levels deep"))
+    if code["avg_file_loc"]:
+        _row("Avg per file", f"{code['avg_file_loc']:,}", _dim("lines"))
     if code["test_files"]:
-        code_line += f" · tests {code['test_loc']:,} loc ({code['test_ratio']:.2f}x)"
-    row("Code", code_line)
-
-    structure = list(profile.package_files)
+        n = code["test_files"]
+        _row("Test lines", f"{code['test_loc']:,}",
+             _dim(f"{code['test_ratio']:.2f}× of source · {n:,} file{'s' if n != 1 else ''}"))
+    if profile.package_files:
+        _row("Structure", "", ", ".join(profile.package_files))
     if profile.entry_points:
-        structure.append("entry " + ", ".join(profile.entry_points))
-    if structure:
-        row("Structure", " · ".join(structure))
+        _row("Entry", "", ", ".join(profile.entry_points))
 
     if languages:
-        print()
-        print("Languages")
-        for s in languages:
-            plural = "file" if s["files"] == 1 else "files"
-            print(f"  {s['language']:<14}{s['loc']:>9,}  {s['files']:>3} {plural}")
+        _render_languages(languages)
 
-    assets = core.asset_inventory(repo)
     # Surface assets only when they carry weight — model or data artifacts. A
     # couple of config yamls in a plain software repo are noise, not signal.
     if assets.keys() & {"weights", "data"}:
-        print()
-        print("Assets")
-        for bucket in ("weights", "configs", "data"):
-            entry = assets.get(bucket)
-            if not entry:
-                continue
-            plural = "file" if entry["files"] == 1 else "files"
-            exts = " ".join(f"{ext}×{n}" for ext, n in
-                            sorted(entry["exts"].items(), key=lambda kv: (-kv[1], kv[0])))
-            size = f" · {_human_bytes(entry['bytes'])}" if entry["bytes"] else ""
-            print(f"  {bucket:<9}{entry['files']:>4} {plural}{size}   {exts}")
-
+        _render_assets(assets)
     # Name the model families a source-line count can't see. When this lists
     # models, reach for `--mode ml` to document them one page each.
     if profile.models:
-        print()
-        print("Models")
-        for m in profile.models:
-            arch = m["arch"] or "?"
-            fmts = " ".join(m["formats"]) if m["formats"] else ""
-            name = m["name"] if len(m["name"]) <= 24 else m["name"][:23] + "…"
-            print(f"  {name:<26}{arch:<40} {fmts}".rstrip())
+        _render_models(profile.models)
 
-    stats = core.git_stats(repo)
-    gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))
     if stats or gh:
-        print()
+        _section("REPOSITORY")
     if stats:
-        parts = [f"{stats['commits']} commits"]
+        _row("Commits", f"{stats['commits']:,}",
+             _dim(f"{stats['recent_commits_30d']:,} in the last 30 days"))
         if stats["contributors"]:
-            parts.append(f"{stats['contributors']} contributors")
+            _row("Contributors", f"{stats['contributors']:,}")
         if stats["first_commit"] and stats["last_commit"]:
-            parts.append(f"{stats['first_commit']}→{stats['last_commit']}")
-        parts.append(f"{stats['recent_commits_30d']} in 30d")
-        if stats["current_version"]:
-            parts.append(stats["current_version"])
-        if stats["dirty"]:
-            parts.append("dirty")
-        row("Git", " · ".join(parts))
+            _row("History", "", _dim(f"{stats['first_commit']} → {stats['last_commit']}"))
+        version = [v for v in (stats["current_version"], "dirty" if stats["dirty"] else "") if v]
+        if version:
+            _row("Version", "", " · ".join(version))
 
     if gh:
-        parts = [gh["full_name"]]
+        flags = [f for f, on in (("archived", gh.get("archived")), ("fork", gh.get("is_fork"))) if on]
+        named = [gh["full_name"], *([gh["license"]] if gh.get("license") else []), *flags]
+        _row("GitHub", "", " · ".join(named))
         stars = gh.get("stars")
-        if stars is not None:
-            parts.append(f"{stars}★")
-        elif gh.get("error"):
-            parts.append(gh["error"])
-        if gh.get("forks"):
-            parts.append(f"{gh['forks']} forks")
-        if gh.get("open_issues"):
-            parts.append(f"{gh['open_issues']} issues")
-        if gh.get("license"):
-            parts.append(gh["license"])
-        for flag, on in (("archived", gh.get("archived")), ("fork", gh.get("is_fork"))):
-            if on:
-                parts.append(flag)
+        counts = [f"{gh['forks']:,} forks" if gh.get("forks") else "",
+                  f"{gh['open_issues']:,} open issues" if gh.get("open_issues") else ""]
+        _row("Stars", f"{stars:,}" if stars is not None else "n/a",
+             _dim(" · ".join(c for c in counts if c) or gh.get("error") or ""))
         if gh.get("pushed_at"):
-            parts.append(f"pushed {gh['pushed_at'][:10]}")
-        row("GitHub", " · ".join(parts))
-        if gh.get("description"):
-            row("", gh["description"])
+            _row("Pushed", "", _dim(gh["pushed_at"][:10]))
+
+    print()
     return 0
 
 

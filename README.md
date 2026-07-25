@@ -81,37 +81,52 @@ yread profile               # or: yread profile /path/to/repo
 ```
 
 ```text
-Project    /path/to/repo
-Files      237 source · 320 total · depth 6
-Code       14,695 loc · avg 62/file · tests 53 loc (0.00x)
+  repo                                               /path/to/repo
+  A small tool that does one thing well
 
-Languages
-  Swift             7,673   73 files
-  Objective-C       4,888   70 files
-  C/C++               831   80 files
-  Go                  692    5 files
+  CODE ───────────────────────────────────────────────────────────
+    Lines of code  14,695    excludes blanks and comments
+    Source files      237    of 320 files · 6 levels deep
+    Avg per file       62    lines
+    Test lines        531    0.04× of source · 3 files
+    Structure                Package.swift, Podfile
+    Entry                    Sources/App/main.swift
 
-Git        18 commits · 3 contributors · 2025-09-25→2026-07-06 · 5 in 30d · v0.3.0
-GitHub     owner/repo · 12★ · MIT · pushed 2026-07-06
+  LANGUAGES ──────────────────────────────────────────────────────
+    Swift           7,673    ██████████████  54%
+    Objective-C     4,888    ████████▉       35%
+    C/C++             831    █▌               6%
+    Go                692    █▎               5%
+
+  REPOSITORY ─────────────────────────────────────────────────────
+    Commits            18    5 in the last 30 days
+    Contributors        3
+    History                  2025-09-25 → 2026-07-06
+    Version                  v0.3.0
+    GitHub                   owner/repo · MIT
+    Stars             128    12 forks · 4 open issues
+    Pushed                   2026-07-06
 ```
+
+Every row is the same three columns — what it is, the figure, and the detail — so
+each section's numbers stack into one column you can scan straight down.
 
 Every line count is **core code** — blank and comment-only lines are excluded, and
 bundled dependencies (`Pods`, `Carthage`, `vendor`, `3rdparty`, build output, …)
-are skipped, so the numbers track the team's own logic. The `Languages` table lists
-each language's core code lines and sums to the `Code` total. Tests are counted
-separately and shown as a ratio of core code.
+are skipped, so the numbers track the team's own logic. The `LANGUAGES` section
+lists each language's core code lines and sums to `Lines of code`. Tests are
+counted separately and shown as a ratio of core code.
 
-For any git repository it adds a `git:` section — commit count, history span
+For any git repository the `REPOSITORY` section adds commit count, history span
 (first/last commit dates), commits in the last 30 days, contributor count,
 latest tag, and whether the working tree is dirty — all from local git, no
 network.
 
-When the repo's `origin` remote points to GitHub, it adds a `github:` section
-from a single API call: description, stars, forks, watchers, open issues,
-topics, license, homepage, default branch, last push, and `archived`/`fork`
-flags. Set `GITHUB_TOKEN` for higher rate limits and private repos. On failure
-the star line shows `n/a` with the reason (`offline` or `HTTP <code>`, e.g. a
-rate-limited or private repo).
+When the repo's `origin` remote points to GitHub, the same section grows a few
+rows from a single API call: description (shown under the title), stars, forks,
+open issues, license, last push, and `archived`/`fork` flags. Set `GITHUB_TOKEN`
+for higher rate limits and private repos. On failure the `Stars` row shows `n/a`
+with the reason (`offline` or `HTTP <code>`, e.g. a rate-limited or private repo).
 
 ## Documentation Mode
 
@@ -137,17 +152,18 @@ yread config set MODE ml        # switch to the ML lens
 yread generate /path/to/repo --mode ml   # or per run
 ```
 
-To decide which mode a repo needs, run `yread profile`. An `Assets` section surfaces
+To decide which mode a repo needs, run `yread profile`. An `ASSETS` section surfaces
 model weights and datasets — the files a source-line count ignores — and, when it finds
-them, a `Models` section names each detected model family and its architecture:
+them, a `MODELS` section names each detected model family and its architecture:
 
 ```text
-Assets
-  weights     9 files · 2.9 GB   .om×4 .onnx×4 .pth×1
-  ...
-Models
-  audio_model     ASTForAudioClassification    .om .onnx .pth
-  image_model     ?                            .om .onnx
+  ASSETS ─────────────────────────────────────────────────────────
+    weights             9    files · 2.9 GB · .om×4 .onnx×4 .pth×1
+    data                3    files · 40.0 MB · .wav×3
+
+  MODELS ─────────────────────────────────────────────────────────
+    audio_model              ASTForAudioClassification · .om .onnx .pth
+    image_model              ? · .om .onnx
 ```
 
 If it lists models, reach for `--mode ml`.

@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -452,13 +453,14 @@ def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
 
     assert cli.main(["profile", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert f"Project    {tmp_path}" in out
-    assert "Languages" in out
-    assert "Python" in out and "1 file" in out  # per-language table row
-    assert "pyproject.toml" in out
-    assert "entry src/demo/cli.py" in out
-    assert "Code       1 loc" in out
-    assert "avg" in out
+    assert str(tmp_path) in out  # repo path in the header
+    assert "CODE" in out and "LANGUAGES" in out
+    assert "Python" in out  # single-language line
+    assert "pyproject.toml" in out  # Structure row
+    assert "src/demo/cli.py" in out  # Entry row
+    # Figures sit in their own right-aligned column, not spliced into prose
+    assert "Lines of code" in out and "Avg per file" in out
+    assert re.search(r"^ +Lines of code +1 +excludes", out, re.MULTILINE)
     assert "primary_languages" not in out  # redundant with the Languages line
     assert "signals" not in out            # low-signal fields dropped
     assert "max_depth" not in out          # humanized as "depth N", raw field not dumped
@@ -684,8 +686,8 @@ def test_cli_profile_shows_git_section(tmp_path: Path, monkeypatch: pytest.Monke
 
     assert cli.main(["profile", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert "Git        1 commits" in out
-    assert "1 contributors" in out
+    assert re.search(r"^ +Commits +1 +1 in the last 30 days", out, re.MULTILINE)
+    assert re.search(r"^ +Contributors +1$", out, re.MULTILINE)
     assert "GitHub" not in out  # no origin remote -> no network
 
 
@@ -816,67 +818,14 @@ def test_asset_inventory_buckets(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Viewer — select-to-explain                                                   #
+# Viewer                                                                       #
 # --------------------------------------------------------------------------- #
 
-def test_explain_assets_reflects_enabled_flag() -> None:
-    on = viewer.explain_assets(True)
-    off = viewer.explain_assets(False)
-    assert "yr-ebub" in on and "提问" in on  # prompt box + ask button, no auto-run
-    assert "if(!true)" in on
-    assert "if(!false)" in off
-    # The page template accepts the scripts slot alongside its other placeholders.
-    page = viewer.PAGE.format(title="T", nav="N", body="B", scripts=on)
-    assert "yr-ebub" in page and "<title>T · yread</title>" in page
-
-
-def test_page_scripts_and_sidebar_toggle() -> None:
-    # The sidebar drawer toggle is always present; the explain layer is gated.
-    js = viewer.page_scripts(False)
-    assert "sb-open" in js and "if(!false)" in js
+def test_page_layout_script_and_sidebar_toggle() -> None:
+    page = viewer.PAGE.format(title="T", nav="N", body="B", scripts=viewer.LAYOUT_JS)
+    assert "<title>T · yread</title>" in page
+    assert "sb-open" in page and "yr-zoom" in page  # drawer toggle + click-to-zoom
     assert 'id="yr-menu"' in viewer.PAGE and "@media (max-width:800px)" in viewer.PAGE
-
-
-def test_generate_explanation_renders_markdown() -> None:
-    from types import SimpleNamespace
-
-    captured: dict = {}
-
-    def create(model, messages):
-        captured["model"] = model
-        captured["messages"] = messages
-        msg = SimpleNamespace(content="**ViT** is a *Vision Transformer*.")
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
-
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    html = viewer.generate_explanation(client, "m1", "zh", "ViT")
-    assert "<strong>ViT</strong>" in html and "<em>Vision Transformer</em>" in html
-    assert captured["model"] == "m1"
-    assert "Chinese" in captured["messages"][0]["content"]  # lang code -> readable name
-    assert captured["messages"][1]["content"] == "ViT"
-
-
-def test_generate_explanation_uses_custom_prompt() -> None:
-    from types import SimpleNamespace
-
-    captured: dict = {}
-
-    def create(model, messages):
-        captured["messages"] = messages
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ans"))])
-
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    viewer.generate_explanation(client, "m1", "zh", "a selected passage", "翻译成英文")
-    sys_msg, user_msg = captured["messages"][0]["content"], captured["messages"][1]["content"]
-    assert "翻译成英文" in sys_msg          # the custom prompt drives the instruction
-    assert "Chinese" in sys_msg             # answer language still enforced
-    assert user_msg == "a selected passage"  # the selection is the user content
-
-
-def test_default_explain_prompt_by_language() -> None:
-    assert "解释" in viewer.default_explain_prompt("zh")
-    assert "explain" in viewer.default_explain_prompt("en").lower()
-    assert viewer.default_explain_prompt("de") == viewer.default_explain_prompt("en")  # fallback
 
 
 def test_build_profile_html_renders_from_meta() -> None:
@@ -916,10 +865,6 @@ def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
     viewer.Handler.pages = pages
     viewer.Handler.byslug = {p["slug"]: p for p in pages}
     viewer.Handler.repo = None
-    viewer.Handler.settings = None
-    viewer.Handler.client = None
-    viewer.Handler.lang = "zh"
-    viewer.Handler.explain_cache = {}
     viewer.Handler.home_body = None  # no profile home -> / falls back to the first page
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), viewer.Handler)
@@ -929,7 +874,6 @@ def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
         # urlopen follows the 302 to the encoded /p/<slug> and must land on the page
         body = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode("utf-8")
         assert "概览" in body
-        assert "if(!false)" in body  # explain assets present but disabled (no settings)
     finally:
         srv.shutdown()
 
