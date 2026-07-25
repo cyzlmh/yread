@@ -198,14 +198,14 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/src/") and self.repo:
             f = safe_source_path(self.repo, path[len("/src/"):])
             if f:
-                return self._send(f.read_text(errors="replace").encode(), "text/plain; charset=utf-8")
+                return self._send(f.read_text(encoding="utf-8", errors="replace").encode(), "text/plain; charset=utf-8")
             return self._send(b"not found", code=404)
         if path.startswith("/p/"):
             slug = unquote(path[len("/p/"):])  # browsers percent-encode CJK slugs
             p = self.byslug.get(slug)
             if not p:
                 return self._send(b"page not found", code=404)
-            md_text = (self.wiki / p["file"]).read_text(errors="replace")
+            md_text = (self.wiki / p["file"]).read_text(encoding="utf-8", errors="replace")
             slugs = set(self.byslug)
             html = PAGE.format(title=p["title"],
                                nav=build_nav(self.pages, slug),
@@ -225,7 +225,7 @@ def main(argv: list[str] | None = None):
         elif args[i] == "--repo": repo = Path(args[i + 1]).resolve(); i += 2
         else: wiki_arg = args[i]; i += 1
     wiki = resolve_wiki(wiki_arg)
-    meta = json.loads((wiki / "wiki.json").read_text())
+    meta = json.loads((wiki / "wiki.json").read_text(encoding="utf-8"))
     if meta.get("schema_version") != 2:
         raise SystemExit(f"unsupported wiki schema under {wiki}: expected schema_version 2")
     if repo is None and meta.get("source_root"):

@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ def clear_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def write_page(root: Path, page: dict, text: str) -> None:
     target = root / page["file"]
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
+    target.write_text(text, encoding="utf-8")
 
 
 def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,6 +231,57 @@ def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
     assert "**Profile**" in summary
     assert "| Files | 0 source · 1 total · max depth 1 |" in summary
     assert "**Models**" not in summary
+
+
+CJK_ROUND_TRIP = '''
+import json, sys, warnings
+from datetime import datetime, timezone
+from pathlib import Path
+
+from yread import core
+
+package = str(Path(core.__file__).parent)
+out = Path(sys.argv[1]) / ".yread"
+(out / "wiki").mkdir(parents=True)
+pages = [{"slug": "1-概览", "file": "wiki/1-概览.md", "title": "项目概览",
+          "section": "入门", "kind": "overview", "level": "Beginner"}]
+(out / pages[0]["file"]).write_text("# 项目概览\\n\\n中文正文\\n", encoding="utf-8")
+profile = core.ProjectProfile(
+    total_files=1, source_files=1, primary_languages=["Python"], max_depth=1,
+    has_readme=True, has_tests=False, has_ci=False, package_files=[], entry_points=[])
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    core.write_wiki_index(out, pages, "run1", datetime.now(timezone.utc),
+                          "zh", "brief", profile, {"页面": "abc"})
+    loaded, manifest, meta = core.load_wiki(out)
+    incomplete = core.wiki_is_incomplete(out, pages)
+
+assert loaded[0]["title"] == "项目概览", loaded
+assert meta["pages"][0]["section"] == "入门", meta
+assert manifest == {"页面": "abc"}, manifest
+assert incomplete is False
+assert "项目概览" in (out / "SUMMARY.md").read_text(encoding="utf-8")
+implicit = sorted({f"{w.filename}:{w.lineno}" for w in caught
+                   if w.category is EncodingWarning and w.filename.startswith(package)})
+assert not implicit, "read without an explicit encoding: " + ", ".join(implicit)
+'''
+
+
+def test_cjk_wiki_round_trips_with_explicit_encoding(tmp_path: Path) -> None:
+    """yread writes its wiki as UTF-8 (`ensure_ascii=False`), so every read of those
+    files has to name that encoding — a bare `read_text()` falls back to the locale
+    codepage, which mangles CJK on Windows. Drive the write/read cycle under
+    `-X warn_default_encoding`, where an implicit encoding raises an EncodingWarning
+    attributed to the yread module that made the call."""
+    script = tmp_path / "round_trip.py"
+    script.write_text(CJK_ROUND_TRIP, encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-X", "warn_default_encoding", str(script), str(tmp_path)],
+        capture_output=True, text=True, encoding="utf-8")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_summary_profile_lines_includes_loc_and_git() -> None:

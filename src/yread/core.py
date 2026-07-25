@@ -204,13 +204,13 @@ def load_pi_provider(name: str) -> tuple[str, str]:
     """Resolve (base_url, api_key) for a provider from ~/.pi, the same files the
     llm-proxy reads."""
     home = Path.home() / ".pi" / "agent"
-    prov = json.loads((home / "models.json").read_text())["providers"][name]
+    prov = json.loads((home / "models.json").read_text(encoding="utf-8"))["providers"][name]
     base = prov["baseUrl"].rstrip("/")
     if not base.endswith("/v1"):
         base += "/v1"
     # auth.json is the live credential store; models.json apiKey can be stale.
     try:
-        key = json.loads((home / "auth.json").read_text())[name]["key"]
+        key = json.loads((home / "auth.json").read_text(encoding="utf-8"))[name]["key"]
     except (FileNotFoundError, KeyError):
         key = prov["apiKey"]
     return base, key
@@ -232,7 +232,7 @@ def _parse_env_file(path: Path | None) -> dict[str, str]:
     if not path.exists():
         raise SystemExit(f"env file not found: {path}")
     env: dict[str, str] = {}
-    for raw in path.read_text(errors="replace").splitlines():
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -389,7 +389,7 @@ def _gitignore_names(repo: Path) -> set[str]:
     names = set()
     gi = repo / ".gitignore"
     if gi.exists():
-        for line in gi.read_text(errors="replace").splitlines():
+        for line in gi.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
@@ -673,14 +673,14 @@ def _detect_entry_points(repo: Path, rel_paths: list[str], package_files: list[s
             add(rel)
 
     if "pyproject.toml" in package_files:
-        text = (repo / "pyproject.toml").read_text(errors="replace")
+        text = (repo / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
         for module in re.findall(r"=\s*\"([A-Za-z_][\w.]*):", text):
             candidate = "src/" + module.replace(".", "/") + ".py"
             add(candidate)
 
     if "package.json" in package_files:
         try:
-            pkg = json.loads((repo / "package.json").read_text(errors="replace"))
+            pkg = json.loads((repo / "package.json").read_text(encoding="utf-8", errors="replace"))
         except json.JSONDecodeError:
             pkg = {}
         for key in ("main", "module", "browser"):
@@ -786,7 +786,7 @@ def language_stats(repo: Path) -> list[dict]:
         if _is_test_path(rel):
             continue
         try:
-            _total, _blank, _comment, code = _line_stats(path.read_text(errors="replace"), ext)
+            _total, _blank, _comment, code = _line_stats(path.read_text(encoding="utf-8", errors="replace"), ext)
         except OSError:
             continue
         entry = stats.setdefault(lang, {"files": 0, "loc": 0})
@@ -810,7 +810,7 @@ def code_stats(repo: Path) -> dict:
         if SOURCE_EXTENSIONS.get(ext) is None:
             continue
         try:
-            _total, _blank, _comment, code = _line_stats(path.read_text(errors="replace"), ext)
+            _total, _blank, _comment, code = _line_stats(path.read_text(encoding="utf-8", errors="replace"), ext)
         except OSError:
             continue
         if _is_test_path(path.relative_to(repo).as_posix()):
@@ -942,7 +942,7 @@ def load_manifest(output_root: Path) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
 
@@ -1018,7 +1018,7 @@ def view_file_in_detail(repo: Path, file_path: str, start_line: int = 1,
     if end_line is None:
         end_line = start_line + 199
     out = []
-    for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+    for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         if n < start_line:
             continue
         if n > end_line:
@@ -1854,7 +1854,7 @@ def load_wiki(output_root: Path, strict: bool = True) -> tuple[list[dict], dict 
     meta_path = output_root / "wiki.json"
     if not meta_path.exists():
         return None
-    meta = json.loads(meta_path.read_text())
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
     if meta.get("schema_version") != 2:
         if strict:
             raise SystemExit(
@@ -1886,7 +1886,7 @@ def page_needs_generation(output_root: Path, page: dict, force: bool,
     path = output_root / page["file"]
     if not path.exists():
         return True
-    content = path.read_text(errors="replace").strip()
+    content = path.read_text(encoding="utf-8", errors="replace").strip()
     if not content:
         return True
     if "This page failed to generate" in content[:500]:
@@ -1934,7 +1934,7 @@ def write_one_page(settings: LLMSettings, config: RuntimeConfig, repo: Path,
         target.write_text(blog + "\n", encoding="utf-8")
     except Exception as e:  # noqa: BLE001 — one bad page must not abort the whole wiki
         ok, error = False, repr(e)
-        existing = target.read_text(errors="replace").strip() if target.exists() else ""
+        existing = target.read_text(encoding="utf-8", errors="replace").strip() if target.exists() else ""
         if not existing or "This page failed to generate" in existing[:500]:
             blog = f"# {page['title']}\n\n> This page failed to generate: {e!r}\n\nRun again with `--resume` to retry this page."
             target.write_text(blog + "\n", encoding="utf-8")
