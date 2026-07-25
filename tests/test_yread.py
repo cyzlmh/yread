@@ -213,7 +213,7 @@ def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
     )
     yread.write_wiki_index(output_root, pages, "run1", datetime.now(timezone.utc),
                            "en", "brief", profile, {}, source_root=tmp_path / "repo")
-    meta = json.loads((output_root / "wiki.json").read_text())
+    meta = json.loads((output_root / "wiki.json").read_text(encoding="utf-8"))
     assert meta["schema_version"] == 2
     assert meta["depth"] == "brief"
     assert meta["mode"] == "software"
@@ -222,7 +222,7 @@ def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
     assert meta["pages"][0]["file"] == "wiki/a.md"
     assert meta["pages"][0]["kind"] == "overview"
     assert meta["pages"][0]["evidenceFiles"] == ["README.md"]
-    summary = (output_root / "SUMMARY.md").read_text()
+    summary = (output_root / "SUMMARY.md").read_text(encoding="utf-8")
     assert summary.count("(wiki/a.md)") == 1
     # SUMMARY carries the run meta (timestamp/mode/depth/lang) and the full profile
     # table, but no Models table when the profile lists no models.
@@ -266,7 +266,7 @@ def test_summary_includes_model_inventory(tmp_path: Path) -> None:
     )
     yread.write_wiki_index(output_root, pages, "run1", datetime.now(timezone.utc),
                            "zh", "brief", profile, {}, source_root=tmp_path / "repo", mode="ml")
-    summary = (output_root / "SUMMARY.md").read_text()
+    summary = (output_root / "SUMMARY.md").read_text(encoding="utf-8")
     assert "| Languages | Python |" in summary
     assert "| Packages | pyproject.toml |" in summary
     assert "| Entry points | src/app/main.py |" in summary
