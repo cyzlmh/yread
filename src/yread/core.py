@@ -54,6 +54,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from . import __version__
+
 
 IGNORE = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__",
           ".mypy_cache", ".pytest_cache", "dist", "build", ".idea", ".yread", ".zread",
@@ -1809,6 +1811,7 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         "schema_version": 2,
         "id": run_id,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "yread_version": __version__,
         "language": lang_code(doc_lang),
         "depth": depth,
         "mode": mode,

@@ -912,12 +912,13 @@ def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
     slug = "1-项目概览"
     (wiki / f"{slug}.md").write_text("# 概览\n\n正文\n", encoding="utf-8")
     pages = [{"slug": slug, "title": "概览", "file": f"wiki/{slug}.md", "section": "S"}]
+    (tmp_path / "wiki.json").write_text(json.dumps(
+        {"schema_version": 2, "pages": pages}), encoding="utf-8")
 
-    viewer.Handler.wiki = tmp_path
-    viewer.Handler.pages = pages
-    viewer.Handler.byslug = {p["slug"]: p for p in pages}
-    viewer.Handler.repo = None
-    viewer.Handler.home_body = None  # no profile home -> / falls back to the first page
+    old_sites, old_multi = viewer.Handler.__dict__.get("sites"), viewer.Handler.multi
+    viewer.Handler.multi = False
+    viewer.Handler.sites = {"": viewer.Site(tmp_path)}
+    viewer.Handler.sites[""].home_body = None  # no profile home -> / falls back to the first page
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), viewer.Handler)
     port = srv.server_address[1]
@@ -928,6 +929,9 @@ def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
         assert "概览" in body
     finally:
         srv.shutdown()
+        viewer.Handler.multi = old_multi
+        if old_sites is not None:
+            viewer.Handler.sites = old_sites
 
 
 def test_build_profile_populates_ml_fields(tmp_path: Path) -> None:

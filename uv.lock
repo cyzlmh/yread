@@ -524,11 +524,12 @@ wheels = [
 
 [[package]]
 name = "yread"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "markdown" },
     { name = "openai" },
+    { name = "pygments" },
 ]
 
 [package.dev-dependencies]
@@ -540,6 +541,7 @@ dev = [
 requires-dist = [
     { name = "markdown", specifier = ">=3.6" },
     { name = "openai", specifier = ">=1.30" },
+    { name = "pygments", specifier = ">=2.12" },
 ]
 
 [package.metadata.requires-dev]

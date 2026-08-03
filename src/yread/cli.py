@@ -70,6 +70,8 @@ def _build_parser() -> argparse.ArgumentParser:
     browse.add_argument("--host", default="localhost", help="Host to bind")
     browse.add_argument("--port", type=int, default=8000)
     browse.add_argument("--repo", default=None, help="Source repository for source links")
+    browse.add_argument("--enable-source", action="store_true",
+                        help="Multi-wiki mode: serve /src/ source files from each wiki's recorded source_root")
 
     sub.add_parser("version", help="Print the version number")
 
@@ -158,6 +160,8 @@ def _run_browse(args: argparse.Namespace) -> int:
     viewer_args.extend(["--host", args.host, "--port", str(args.port)])
     if args.repo:
         viewer_args.extend(["--repo", args.repo])
+    if args.enable_source:
+        viewer_args.append("--enable-source")
     viewer.main(viewer_args)
     return 0
 

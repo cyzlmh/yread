@@ -291,6 +291,61 @@ Or point at a wiki explicitly; `--repo` overrides the recorded source root:
 uv run yread browse /path/to/repo/.yread --host localhost --port 8000
 ```
 
+## Deploy as a Website
+
+Point `browse` at a directory of wikis instead of a single one and it becomes a
+multi-wiki site: each subdirectory that is a yread output (or has a default
+`.yread/` one) is mounted at `/w/<name>/`, and `/` lists every project. The
+index rescans on every visit, so uploading a new wiki needs no restart.
+
+```bash
+yread browse /srv/wikis --host 127.0.0.1 --port 8000
+```
+
+Layout on the server — either shape works:
+
+```
+/srv/wikis/
+├── projA/wiki.json + wiki/...       # wiki dir is the project dir itself
+└── projB/.yread/wiki.json + wiki/...# or the default output layout
+```
+
+Multi-wiki mode is safe to expose publicly: source citations stay inert and
+`/src/` is closed unless you pass `--enable-source`, so a `source_root` recorded
+at generation time can't leak a source tree. Put it behind a reverse proxy for
+TLS — nginx example:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name wiki.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+And a systemd unit to keep it running:
+
+```ini
+[Unit]
+Description=yread wiki browser
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/yread browse /srv/wikis --host 127.0.0.1 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Publish a wiki by copying the generated `wiki.json` and `wiki/` into
+`/srv/wikis/<name>/` (e.g. `rsync -a repo/.yread/ vps:/srv/wikis/repo/`); it
+shows up on the index immediately.
+
 ## Codex Skill
 
 A companion Codex skill is available at [skills/yread/SKILL.md](skills/yread/SKILL.md).
