@@ -55,6 +55,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from . import __version__
+from .mermaid import sanitize_mermaid
 
 
 IGNORE = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__",
@@ -2111,6 +2112,14 @@ def write_one_page(settings: LLMSettings, config: RuntimeConfig, repo: Path,
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         blog = generate_page(client, repo, messages, page["slug"], settings, config)
+        # Deterministic mermaid repair: quote unquoted labels that contain
+        # lexer-breaking characters (@ { } | ( ), a leading ``[/``, or a
+        # fullwidth colon in a subgraph title). Runs on every page, in-flow,
+        # before writing — no extra command, no rendering, no new dependency.
+        blog, mermaid_fixes = sanitize_mermaid(blog)
+        if mermaid_fixes:
+            print(f"    [mermaid] fixed {mermaid_fixes} label(s) in {page['slug']}",
+                  flush=True)
         ok, error = True, None
         target.write_text(blog + "\n", encoding="utf-8")
     except Exception as e:  # noqa: BLE001 — one bad page must not abort the whole wiki
