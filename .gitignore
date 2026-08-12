@@ -18,6 +18,9 @@ venv/
 .env.*
 !.env.yread.example
 .env.yread
+
+# Agent runtime artifacts (pi subagent mission records, local-only)
+.pi/
 .env.yread.local
 .pytest_cache/
 
