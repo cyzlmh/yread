@@ -103,7 +103,7 @@ INIT_PROMPTS = [
     ("MODEL", "Model name", ""),
     ("DOC_LANG", "Documentation language code [zh/en]", "en"),
     ("DEPTH", "Documentation depth [brief/standard/deep]", "brief"),
-    ("MODE", "Documentation mode [software/ml]", "software"),
+    ("MODE", "Documentation mode [software/ml/skill]", "software"),
     ("OUTPUT_DIR", "Output directory (blank = <repo>/.yread)", ""),
 ]
 
@@ -300,6 +300,13 @@ def _render_models(models: list[dict]) -> None:
         _row(_clip(m["name"], _LABEL), "", f"{_clip(m['arch'] or '?', 30)}{fmts}")
 
 
+def _render_skills(skills: list[dict]) -> None:
+    _section("SKILLS")
+    for s in skills:
+        desc = " ".join(str(s.get("description") or "").split())
+        _row(_clip(s["name"], _LABEL), "", _clip(desc or s.get("dir") or "", 40))
+
+
 def _run_profile(args: argparse.Namespace) -> int:
     global _COLOR
     _COLOR = _supports_color()
@@ -344,6 +351,10 @@ def _run_profile(args: argparse.Namespace) -> int:
     # models, reach for `--mode ml` to document them one page each.
     if profile.models:
         _render_models(profile.models)
+    # Name the skills a source-line count can't see. When this lists skills,
+    # reach for `--mode skill` to document one page per skill.
+    if profile.skills:
+        _render_skills(profile.skills)
 
     if stats or gh:
         _section("REPOSITORY")

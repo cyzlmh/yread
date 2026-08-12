@@ -146,10 +146,20 @@ auto-detection:
   `model-conversion`, `model-serving`, `training`, and `evaluation`. Binary weights are
   never read as text — the agent infers each model from its `config.json`, modeling
   code, and export/convert scripts. Generic software pages are demoted to at most one.
+- `skill` — **skill-first**, for agent-skill repositories (one or more `SKILL.md`
+  files with `name`/`description` frontmatter, optionally bundling `scripts/`,
+  `references/`, and `assets/`). There is no LLM catalog-planning step: the profile
+  detects every `SKILL.md` and the catalog is built deterministically — **one page
+  per skill**, plus one collection-overview page for multi-skill repos. Each skill
+  page answers, for a reader who wants to grasp the skill in minutes: what it does,
+  when an agent should invoke it, and how it works (the instruction flow plus what
+  each bundled script and reference provides). Depth tiers do not apply — a page's
+  size is bounded by the skill itself.
 
 ```bash
 yread config set MODE ml        # switch to the ML lens
 yread generate /path/to/repo --mode ml   # or per run
+yread generate /path/to/skill-repo --mode skill
 ```
 
 To decide which mode a repo needs, run `yread profile`. An `ASSETS` section surfaces
@@ -166,7 +176,8 @@ them, a `MODELS` section names each detected model family and its architecture:
     image_model              ? · .om .onnx
 ```
 
-If it lists models, reach for `--mode ml`.
+If it lists models, reach for `--mode ml`; if it lists skills (`SKILLS` section),
+reach for `--mode skill`.
 
 ## Provider Configuration
 

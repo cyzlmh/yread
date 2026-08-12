@@ -1077,3 +1077,122 @@ def test_mode_cli_flag_overrides_env(tmp_path: Path, monkeypatch: pytest.MonkeyP
     args = parser.parse_args([str(tmp_path), "--env-file", str(env), "--mode", "software"])
     config = yread.config_from_args(args)
     assert config.mode == "software"
+
+
+def _write_skill(repo: Path, rel_dir: str, name: str, description: str,
+                 companions: tuple[str, ...] = ()) -> None:
+    skill_dir = repo / rel_dir if rel_dir else repo
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nDo the thing.\n",
+        encoding="utf-8")
+    for d in companions:
+        (skill_dir / d).mkdir(exist_ok=True)
+
+
+def test_detect_skills_single_skill_repo(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "", "pop-notify", "Send Windows notifications.",
+                 companions=("scripts",))
+
+    skills = yread.detect_skills(tmp_path)
+
+    assert len(skills) == 1
+    assert skills[0]["name"] == "pop-notify"
+    assert skills[0]["dir"] == ""
+    assert skills[0]["description"] == "Send Windows notifications."
+    assert skills[0]["companions"] == ["scripts"]
+
+
+def test_detect_skills_collection_repo(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "jira-projects", "jira-projects", "Manage Jira projects.")
+    _write_skill(tmp_path, "jira-agile", "jira-agile", "Run agile ceremonies.",
+                 companions=("scripts", "references"))
+
+    skills = yread.detect_skills(tmp_path)
+
+    assert [s["name"] for s in skills] == ["jira-agile", "jira-projects"]
+    assert skills[0]["dir"] == "jira-agile"
+    assert skills[0]["companions"] == ["scripts", "references"]
+
+
+def test_detect_skills_falls_back_to_dir_name_and_handles_block_description(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "notify"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\ndescription: |\n  Send notifications.\n  Use when a task completes.\n---\n\n# Notify\n",
+        encoding="utf-8")
+    (tmp_path / "README.md").write_text("# not a skill\n")
+
+    skills = yread.detect_skills(tmp_path)
+
+    assert len(skills) == 1
+    assert skills[0]["name"] == "notify"  # no frontmatter name -> directory name
+    assert skills[0]["description"] == "Send notifications. Use when a task completes."
+
+
+def test_detect_skills_ignores_malformed_frontmatter(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_text("# no frontmatter at all\n", encoding="utf-8")
+
+    skills = yread.detect_skills(tmp_path)
+
+    assert len(skills) == 1
+    assert skills[0]["name"] == tmp_path.name
+    assert skills[0]["description"] == ""
+
+
+def test_build_skill_catalog_single_skill(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "", "pop-notify", "Send Windows notifications.")
+    skills = yread.detect_skills(tmp_path)
+
+    pages = yread.build_skill_catalog(tmp_path, skills, "en")
+
+    assert len(pages) == 1  # no overview page for a single-skill repo
+    assert pages[0]["kind"] == "skill"
+    assert pages[0]["title"] == "pop-notify"
+    assert pages[0]["evidenceFiles"] == ["SKILL.md"]
+
+
+def test_build_skill_catalog_collection_adds_overview(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Jira skills\n")
+    _write_skill(tmp_path, "jira-projects", "jira-projects", "Manage Jira projects.")
+    _write_skill(tmp_path, "jira-agile", "jira-agile", "Run agile ceremonies.",
+                 companions=("scripts",))
+    skills = yread.detect_skills(tmp_path)
+
+    pages = yread.build_skill_catalog(tmp_path, skills, "zh")
+
+    assert len(pages) == 3
+    overview, skill_pages = pages[0], pages[1:]
+    assert overview["kind"] == "overview"
+    assert overview["section"] == "概述"
+    assert overview["evidenceFiles"][0] == "README.md"
+    assert "jira-agile/SKILL.md" in overview["evidenceFiles"]
+    assert {p["section"] for p in skill_pages} == {"技能"}
+    agile = next(p for p in skill_pages if p["title"] == "jira-agile")
+    assert agile["evidenceFiles"] == ["jira-agile/SKILL.md", "jira-agile/scripts"]
+
+
+def test_skill_mode_pages_use_skill_prompts(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "", "pop-notify", "Send Windows notifications.")
+    skills = yread.detect_skills(tmp_path)
+    pages = yread.build_skill_catalog(tmp_path, skills, "en")
+    config = yread.RuntimeConfig(
+        provider="deepseek", base_url=None, api_key=None, model=None,
+        doc_lang="en", depth="brief", max_steps=24, max_topics=30,
+        concurrency=1, enable_shell=True, mode="skill")
+
+    messages = yread.page_messages(tmp_path, config, "tree", pages, pages[0])
+
+    assert "agent skills" in messages[0]["content"]
+    assert "quick-facts table" in messages[1]["content"]
+    assert "<blog>" in messages[1]["content"]
+
+
+def test_config_from_args_reads_skill_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_config_env(monkeypatch)
+    env = tmp_path / ".env.yread"
+    env.write_text("MODE=skill\n")
+    parser = yread.build_arg_parser()
+    args = parser.parse_args([str(tmp_path), "--env-file", str(env)])
+    config = yread.config_from_args(args)
+    assert config.mode == "skill"

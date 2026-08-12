@@ -20,7 +20,7 @@ variables):
     MODEL       override the model name       (else the provider's default)
     DOC_LANG    documentation language code  (default en; e.g. zh | en; NOT $LANG)
     DEPTH       documentation depth          (default brief; brief | standard | deep)
-    MODE        documentation mode           (default software; software | ml)
+    MODE        documentation mode           (default software; software | ml | skill)
     MAX_STEPS   tool-call rounds per agent   (default 24)
     MAX_TOPICS  catalog topic cap            (default 30)
     CONCURRENCY parallel page agents          (default 1)
@@ -78,7 +78,7 @@ SENSITIVE_NAMES = {
 SENSITIVE_GLOBS = ("*.pem", "*.key", "*.p12", "*.pfx")
 
 DEPTHS = {"brief", "standard", "deep"}
-MODES = {"software", "ml"}
+MODES = {"software", "ml", "skill"}
 TOPIC_KINDS = {
     "overview", "quickstart", "architecture", "concepts", "runtime-flow",
     "extension-points", "tradeoffs", "change-guide", "reference",
@@ -200,6 +200,7 @@ class ProjectProfile:
     config_files: int = 0
     data_files: int = 0
     models: list[dict] = field(default_factory=list)
+    skills: list[dict] = field(default_factory=list)
 
 
 def load_pi_provider(name: str) -> tuple[str, str]:
@@ -304,7 +305,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--depth", choices=sorted(DEPTHS), default=None,
                    help="Documentation depth: brief, standard, or deep (default brief)")
     p.add_argument("--mode", choices=sorted(MODES), default=None,
-                   help="Documentation mode: software or ml (default software)")
+                   help="Documentation mode: software, ml, or skill (default software)")
     return p
 
 
@@ -611,6 +612,67 @@ def asset_inventory(repo: Path) -> dict[str, dict]:
     return buckets
 
 
+# Skill projects. A repo is a skill project when it ships one or more SKILL.md
+# files — each an installable agent skill (name + description frontmatter,
+# optionally bundled scripts/references/assets). The substance lives in the
+# instruction markdown, not in call graphs, so these repos get their own mode.
+SKILL_COMPANION_DIRS = ("scripts", "references", "assets")
+
+
+def _parse_skill_frontmatter(path: Path) -> dict:
+    """Minimal YAML-frontmatter reader for SKILL.md — stdlib-only. Extracts the
+    top-level scalar fields (name, description, ...); a malformed or missing
+    block yields an empty dict and callers fall back to the directory name."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    if not lines or lines[0].strip() != "---":
+        return {}
+    end = next((i for i in range(1, min(len(lines), 200))
+                if lines[i].strip() in ("---", "...")), None)
+    if end is None:
+        return {}
+    fm: dict[str, str] = {}
+    i = 1
+    while i < end:
+        m = re.match(r"^([A-Za-z_-]+):\s*(.*)$", lines[i])
+        if m:
+            key, value = m.group(1), m.group(2).strip()
+            if value in ("|", ">", "|-", ">-", "|+", ">+"):
+                block: list[str] = []
+                i += 1
+                while i < end and (not lines[i].strip() or lines[i][0] in " \t"):
+                    block.append(lines[i].strip())
+                    i += 1
+                fm[key] = " ".join(b for b in block if b)
+                continue
+            fm[key] = value.strip("'\"")
+        i += 1
+    return fm
+
+
+def detect_skills(repo: Path) -> list[dict]:
+    """One entry per SKILL.md in the repo, so skill mode can plan exactly one
+    wiki page per skill. Works for both single-skill repos (SKILL.md at the
+    root) and collections (skills/<name>/SKILL.md or sibling skill dirs)."""
+    repo = repo.resolve()
+    skills: list[dict] = []
+    for path in iter_source_files(repo):
+        if path.name.upper() != "SKILL.MD":
+            continue
+        skill_dir = path.parent
+        rel_dir = skill_dir.relative_to(repo).as_posix()
+        fm = _parse_skill_frontmatter(path)
+        skills.append({
+            "name": fm.get("name") or skill_dir.name,
+            "dir": "" if rel_dir == "." else rel_dir,
+            "description": fm.get("description", ""),
+            "companions": [d for d in SKILL_COMPANION_DIRS if (skill_dir / d).is_dir()],
+        })
+    return sorted(skills, key=lambda s: (s["dir"], s["name"]))
+
+
 def build_project_profile(repo: Path) -> ProjectProfile:
     repo = repo.resolve()
     files = iter_source_files(repo)
@@ -654,6 +716,7 @@ def build_project_profile(repo: Path) -> ProjectProfile:
         config_files=asset_counts["configs"],
         data_files=asset_counts["data"],
         models=detect_model_families(repo),
+        skills=detect_skills(repo),
     )
 
 
@@ -1603,6 +1666,77 @@ Sources: [filename](relative/path#L123-L456)
 Form an architectural hypothesis, verify it with targeted code examination, then write the page. Remember to wrap your FINAL output in <blog></blog> tags."""
 
 
+# Skill mode writes for a different repo shape: a skill is prompt + packaged
+# resources, not executable software, so the page covers function and mechanism
+# (trigger conditions, instruction flow, bundled files) rather than architecture
+# or call graphs. Depth tiers do not apply — a page's size is bounded by the
+# skill itself.
+SKILL_PAGE_SYSTEM = """You are an expert technical writer documenting agent skills for readers who want to quickly understand what a skill does and how it works.
+
+## Environment
+- Working directory: {workdir}
+- Operating system: {os}
+
+## Writing Standard
+- Function first: what the skill does, when an agent should invoke it, and how it achieves that.
+- Evidence based: the SKILL.md frontmatter (name, description) is the ground truth for the skill's declared purpose; verify the working mechanism in the instruction body and the bundled scripts/ / references/ / assets/ files.
+- Source citations: end paragraphs with `Sources: [filename](relative/path#L<start>-L<end>)`.
+- Cross-references: use `[Page Title](page_slug)` syntax.
+- Do not translate the instruction body line by line: distill the mechanism.
+- A skill is prompt plus resources, not executable software: document the instruction logic and the packaged resources, not call graphs or runtime architecture."""
+
+SKILL_PAGE_USER = """## CURRENT MISSION
+**Working directory**: {workdir}
+**Operating system**: {os}
+**Current Page**: "{title}" documentation
+**Page kind**: {kind}
+**Documentation language**: {lang}
+
+## ENVIRONMENT
+Repository structure (top 2 levels):
+```
+{tree}
+```
+
+## NAVIGATION CONTEXT
+**Full Catalog with Your Position**:
+```
+{nav}
+```
+**Content Boundaries**:
+- Write ONLY about "{title}" — avoid content that belongs to other catalog pages.
+- Reference other pages by their exact catalog links when pointing at related skills.
+
+**Evidence source paths**:
+```
+{evidence_files}
+```
+Use these paths as primary evidence. You may inspect other files when needed to verify context, but keep the final page focused on this topic.
+
+## DOCUMENT TYPE REQUIREMENTS
+- Use {lang} for all written content.
+- For `skill`: document THIS ONE skill in this shape:
+  1. A quick-facts table: declared name and description (from the SKILL.md frontmatter), any arguments or metadata the frontmatter declares, and the packaged resources present in the skill directory (scripts/, references/, assets/).
+  2. What it does and when it triggers: the capability it gives the agent, and the situations or trigger phrases where it should be invoked.
+  3. How it works: the instruction flow the skill steers the agent through, what each bundled script does, and what the reference / asset files provide. Cite the files you verified.
+- For `overview`: map the whole skill collection: group the skills by theme, give one line per skill (its declared description) with a link to its page, and note shared conventions (directory layout, common scripts or references).
+- Keep it compact: a reader should grasp the skill in minutes.
+
+## OUTPUT FORMAT
+Wrap your FINAL complete documentation in <blog></blog> tags:
+
+<blog>
+# {title}
+Brief intro of this page's purpose and scope.
+## Section Name
+Content focused solely on {title}
+Sources: [filename](relative/path#L123-L456)
+</blog>
+
+## EXECUTE NOW
+Read the SKILL.md in the evidence paths first, then the bundled scripts and references, then write the page. Remember to wrap your FINAL output in <blog></blog> tags."""
+
+
 def extract_blog(text: str) -> str:
     m = re.search(r"<blog>(.*?)</blog>", text, flags=re.DOTALL)
     return (m.group(1) if m else strip_think(text)).strip()
@@ -1721,6 +1855,38 @@ def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
     return pages
 
 
+def build_skill_catalog(repo: Path, skills: list[dict], doc_lang: str) -> list[dict]:
+    """Deterministic catalog for skill mode: one page per skill, plus one overview
+    page for multi-skill repos. No LLM planning step — a skill repo's
+    documentation structure is fully determined by the SKILL.md files it ships."""
+    zh = lang_code(doc_lang) == "zh"
+    pages: list[dict] = []
+    if len(skills) > 1:
+        evidence = [f"{s['dir']}/SKILL.md" if s["dir"] else "SKILL.md" for s in skills]
+        if (repo / "README.md").is_file():
+            evidence.insert(0, "README.md")
+        pages.append({
+            "section": "概述" if zh else "Overview",
+            "kind": "overview",
+            "level": "Beginner",
+            "title": "技能总览" if zh else "Skills Overview",
+            "evidenceFiles": evidence,
+        })
+    section = "技能" if zh else "Skills"
+    for s in skills:
+        base = s["dir"]
+        evidence = [f"{base}/SKILL.md" if base else "SKILL.md"]
+        evidence += [f"{base}/{d}" if base else d for d in s["companions"]]
+        pages.append({
+            "section": section,
+            "kind": "skill",
+            "level": "Beginner",
+            "title": s["name"],
+            "evidenceFiles": evidence,
+        })
+    return assign_page_fields(pages, repo)
+
+
 def lang_code(doc_lang: str) -> str:
     """Normalize DOC_LANG (standard code like `zh`/`en`, or a legacy name) to a code."""
     s = doc_lang.strip().lower()
@@ -1798,6 +1964,11 @@ def _summary_profile_lines(meta: dict, profile: ProjectProfile,
             arch = m.get("arch") or "—"
             fmts = " ".join(m.get("formats") or []) or "—"
             lines.append(f"| {m['name']} | {arch} | {fmts} |")
+    if profile.skills:
+        lines += ["", "**Skills**", "", "| Skill | Description |", "| --- | --- |"]
+        for s in profile.skills:
+            desc = " ".join(str(s.get("description") or "").split()).replace("|", "\\|")
+            lines.append(f"| {s['name']} | {desc[:80] or '—'} |")
     return lines
 
 
@@ -1915,6 +2086,13 @@ def page_messages(repo: Path, config: RuntimeConfig, tree: str,
     }
     nav = render_nav(pages, page["index"] - 1)
     evidence = "\n".join(f"- {p}" for p in page.get("evidenceFiles", [])) or "- (catalog did not bind evidence paths)"
+    if config.mode == "skill":
+        return [
+            {"role": "system", "content": SKILL_PAGE_SYSTEM.format(**ctx)},
+            {"role": "user", "content": SKILL_PAGE_USER.format(
+                title=page["title"], kind=page.get("kind", "skill"),
+                tree=tree, nav=nav, evidence_files=evidence, **ctx)},
+        ]
     return [
         {"role": "system", "content": PAGE_SYSTEM.format(**ctx)},
         {"role": "user", "content": PAGE_USER.format(
@@ -2050,7 +2228,12 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
             flush=True,
         )
         print(f"      depth: {config.depth} · mode: {config.mode}", flush=True)
-        pages = build_catalog(client, repo, config, settings, tree, current_profile)
+        if config.mode == "skill" and not current_profile.skills:
+            raise SystemExit(
+                f"no SKILL.md found under {repo}; mode 'skill' requires an agent-skill repository")
+        pages = build_skill_catalog(repo, current_profile.skills, config.doc_lang) \
+            if config.mode == "skill" else \
+            build_catalog(client, repo, config, settings, tree, current_profile)
         print(f"      {len(pages)} topics", flush=True)
 
         started = datetime.now(timezone.utc)
