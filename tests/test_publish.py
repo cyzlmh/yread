@@ -241,6 +241,39 @@ def test_publish_cli_generates_and_builds_when_no_artifacts_exist(
     assert called["target"] == "deploy@docs:/srv/yread"
 
 
+def test_publish_cli_passes_gen_flags_to_generate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.env"
+    config_file.write_text("HUB_TARGET=deploy@docs:/srv/yread\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "CONFIG_FILE", config_file)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".yread-dist").mkdir()  # cached: a gen flag should still re-run generate
+    called = {}
+
+    def fake_generate(args, _config) -> Path:
+        called["generate_args"] = args
+        return tmp_path / "generated-wiki"
+
+    monkeypatch.setattr(cli.core, "run_generate", fake_generate)
+
+    def fake_build(wiki: Path) -> Path:
+        called["wiki"] = wiki
+        return tmp_path / "generated-dist"
+
+    monkeypatch.setattr(cli.builder, "build_site", fake_build)
+    monkeypatch.setattr(
+        cli.publisher,
+        "publish_site",
+        lambda dist, target: called.update(dist=dist, target=target) or "projects/owner/repo/",
+    )
+
+    assert cli.main(["publish", "--depth", "deep", "--mode", "ml"]) == 0
+    assert called["generate_args"].depth == "deep"
+    assert called["generate_args"].mode == "ml"
+    assert called["dist"] == tmp_path / "generated-dist"
+
+
 def test_caddy_scaffold_is_static_and_uses_browse_json() -> None:
     root = Path(__file__).parents[1] / "deploy" / "caddy"
     caddyfile = (root / "Caddyfile").read_text(encoding="utf-8")

@@ -81,6 +81,14 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="Built site directory (when given, publish it directly)",
     )
+    publish.add_argument("--env-file", type=Path, default=None,
+                         help="Dotenv-style config file, used when auto-generating")
+    publish.add_argument("--output-dir", type=Path, default=None,
+                         help="Wiki output directory for auto-generation (overrides OUTPUT_DIR)")
+    publish.add_argument("--depth", choices=sorted(core.DEPTHS), default=None,
+                         help="Documentation depth when auto-generating: brief, standard, or deep")
+    publish.add_argument("--mode", choices=sorted(core.MODES), default=None,
+                         help="Documentation mode when auto-generating: software, ml, or skill")
 
     sub.add_parser("version", help="Print the version number")
 
@@ -406,15 +414,34 @@ def main(argv: list[str] | None = None) -> int:
         if args.dist_dir:
             dist_dir = Path(args.dist_dir)
         else:
-            dist_dir = Path(".yread-dist")
-            if not dist_dir.exists():
-                wiki_dir = Path(".yread")
-                if not wiki_dir.exists():
-                    generate_args = _build_generate_parser().parse_args([])
-                    config = core.config_from_args(generate_args, config_files=[CONFIG_FILE])
-                    wiki_dir = core.run_generate(generate_args, config)
+            gen_argv: list[str] = []
+            if args.env_file:
+                gen_argv.extend(["--env-file", str(args.env_file)])
+            if args.output_dir:
+                gen_argv.extend(["--output-dir", str(args.output_dir)])
+            if args.depth:
+                gen_argv.extend(["--depth", args.depth])
+            if args.mode:
+                gen_argv.extend(["--mode", args.mode])
+            default_dist = Path(".yread-dist")
+            if gen_argv:
+                # Explicit generation flag: re-run generate from scratch so the
+                # flag isn't shadowed by a cached .yread/ from a previous run.
+                gen_args = _build_generate_parser().parse_args(gen_argv)
+                config = core.config_from_args(gen_args, config_files=[CONFIG_FILE])
+                wiki_dir = core.run_generate(gen_args, config)
                 dist_dir = builder.build_site(wiki_dir)
                 print(f"built {dist_dir}")
+            elif not default_dist.exists():
+                wiki_dir = Path(".yread")
+                if not wiki_dir.exists():
+                    gen_args = _build_generate_parser().parse_args([])
+                    config = core.config_from_args(gen_args, config_files=[CONFIG_FILE])
+                    wiki_dir = core.run_generate(gen_args, config)
+                dist_dir = builder.build_site(wiki_dir)
+                print(f"built {dist_dir}")
+            else:
+                dist_dir = default_dist
         remote = publisher.publish_site(dist_dir, target)
         print(f"published {remote}")
         return 0

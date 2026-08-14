@@ -1,6 +1,6 @@
 [project]
 name = "yread"
-version = "0.9.0"
+version = "0.9.1"
 description = "Local lightweight repo-to-wiki generator inspired by zread."
 readme = "README.md"
 authors = [
