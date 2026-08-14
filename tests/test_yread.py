@@ -37,12 +37,6 @@ def clear_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(f"YREAD_{key}", raising=False)  # namespaced override
 
 
-def write_page(root: Path, page: dict, text: str) -> None:
-    target = root / page["file"]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-
-
 def test_env_file_config_for_openai_compatible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     clear_config_env(monkeypatch)
     env_file = tmp_path / ".env.yread"
@@ -91,6 +85,15 @@ def test_invalid_depth_fails(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(SystemExit, match="DEPTH must be one of"):
         yread.config_from_args(args)
+
+
+@pytest.mark.parametrize("option", ["--resume", "--force", "--page"])
+def test_generate_rejects_removed_incremental_options(option: str) -> None:
+    argv = [".", option]
+    if option == "--page":
+        argv.append("overview")
+    with pytest.raises(SystemExit):
+        yread.build_arg_parser().parse_args(argv)
 
 
 def test_env_override_requires_yread_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,6 +163,13 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert __version__ in capsys.readouterr().out
 
 
+def test_cli_browse_command_is_removed(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["browse"])
+
+    assert "invalid choice" in capsys.readouterr().err
+
+
 def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                          capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path / ".yread")
@@ -177,21 +187,6 @@ def test_cli_config_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "DEPTH=standard" in out
     assert "MODE=ml" in out
     assert "OUTPUT_DIR" not in out  # left blank -> not written
-
-
-def test_wiki_is_incomplete(tmp_path: Path) -> None:
-    pages = [
-        {"slug": "a", "file": "wiki/a.md", "title": "A"},
-        {"slug": "b", "file": "wiki/b.md", "title": "B"},
-    ]
-    write_page(tmp_path, pages[0], "# A\n\nbody\n")
-    assert yread.wiki_is_incomplete(tmp_path, pages) is True  # b.md missing
-
-    write_page(tmp_path, pages[1], "# B\n\n> This page failed to generate: x\n")
-    assert yread.wiki_is_incomplete(tmp_path, pages) is True  # b.md is a failure stub
-
-    write_page(tmp_path, pages[1], "# B\n\nbody\n")
-    assert yread.wiki_is_incomplete(tmp_path, pages) is False
 
 
 def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
@@ -216,6 +211,8 @@ def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
                            "en", "brief", profile, {}, source_root=tmp_path / "repo")
     meta = json.loads((output_root / "wiki.json").read_text(encoding="utf-8"))
     assert meta["schema_version"] == 2
+    assert meta["project_id"] == "repo"
+    assert meta["status"] == "building"
     assert meta["depth"] == "brief"
     assert meta["mode"] == "software"
     assert meta["project_profile"]["has_readme"] is True
@@ -231,6 +228,28 @@ def test_wiki_index_omits_source_root(tmp_path: Path) -> None:
     assert "**Profile**" in summary
     assert "| Files | 0 source · 1 total · max depth 1 |" in summary
     assert "**Models**" not in summary
+
+
+def test_wiki_status_removes_legacy_source_root(tmp_path: Path) -> None:
+    (tmp_path / "wiki.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "project_id": "old/project",
+                "status": "complete",
+                "source_root": "/private/local/repository",
+                "pages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    yread.write_wiki_status(tmp_path, "building", "new/project")
+
+    meta = json.loads((tmp_path / "wiki.json").read_text(encoding="utf-8"))
+    assert meta["project_id"] == "new/project"
+    assert meta["status"] == "building"
+    assert "source_root" not in meta
 
 
 CJK_ROUND_TRIP = '''
@@ -255,12 +274,11 @@ with warnings.catch_warnings(record=True) as caught:
     core.write_wiki_index(out, pages, "run1", datetime.now(timezone.utc),
                           "zh", "brief", profile, {"页面": "abc"})
     loaded, manifest, meta = core.load_wiki(out)
-    incomplete = core.wiki_is_incomplete(out, pages)
 
 assert loaded[0]["title"] == "项目概览", loaded
 assert meta["pages"][0]["section"] == "入门", meta
 assert manifest == {"页面": "abc"}, manifest
-assert incomplete is False
+assert meta["status"] == "building"
 assert "项目概览" in (out / "SUMMARY.md").read_text(encoding="utf-8")
 implicit = sorted({f"{w.filename}:{w.lineno}" for w in caught
                    if w.category is EncodingWarning and w.filename.startswith(package)})
@@ -414,65 +432,13 @@ Overview
     assert pages[0]["evidenceFiles"] == ["README.md"]
 
 
-def test_plan_pages_skips_existing_but_page_selector_forces_regeneration(tmp_path: Path) -> None:
-    pages = yread.assign_page_fields([
-        {"section": "Get Started", "group": "", "title": "Overview", "level": "Beginner"},
-        {"section": "Deep Dive", "group": "", "title": "Runtime", "level": "Advanced"},
-    ])
-    write_page(tmp_path, pages[0], "# Overview\n")
-
-    todo, skipped = yread.plan_pages(tmp_path, pages, selector=None, force=False)
-    assert [p["slug"] for p in todo] == [pages[1]["slug"]]
-    assert [p["slug"] for p in skipped] == [pages[0]["slug"]]
-
-    todo, skipped = yread.plan_pages(tmp_path, pages, selector=pages[0]["slug"], force=False)
-    assert [p["slug"] for p in todo] == [pages[0]["slug"]]
-    assert skipped == []
-
-
-def test_plan_pages_regenerates_pages_with_changed_evidence_files(tmp_path: Path) -> None:
-    pages = yread.assign_page_fields([
-        {
-            "section": "Get Started",
-            "group": "",
-            "title": "Overview",
-            "level": "Beginner",
-            "evidenceFiles": ["README.md"],
-        },
-        {
-            "section": "Deep Dive",
-            "group": "",
-            "title": "Runtime",
-            "level": "Advanced",
-            "evidenceFiles": ["src/"],
-        },
-    ])
-    for page in pages:
-        write_page(tmp_path, page, f"# {page['title']}\n")
-
-    diff = {"added": [], "modified": ["src/main.py"], "removed": []}
-    todo, skipped = yread.plan_pages(tmp_path, pages, selector=None, force=False, manifest_diff=diff)
-
-    assert [p["slug"] for p in todo] == [pages[1]["slug"]]
-    assert [p["slug"] for p in skipped] == [pages[0]["slug"]]
-
-
-def test_file_manifest_detects_added_modified_and_removed_files(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("old\n")
-    (tmp_path / "old.py").write_text("print('old')\n")
+def test_file_manifest_tracks_source_files_and_omits_secrets(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("content\n")
     (tmp_path / ".env").write_text("SECRET=1\n")
-    before = yread.build_file_manifest(tmp_path)
-
-    (tmp_path / "README.md").write_text("new\n")
-    (tmp_path / "old.py").unlink()
     (tmp_path / "main.py").write_text("print('ok')\n")
-    after = yread.build_file_manifest(tmp_path)
-    diff = yread.diff_manifests(before, after)
+    manifest = yread.build_file_manifest(tmp_path)
 
-    assert diff["added"] == ["main.py"]
-    assert diff["modified"] == ["README.md"]
-    assert diff["removed"] == ["old.py"]
-    assert ".env" not in {f["path"] for f in after["files"]}
+    assert {f["path"] for f in manifest["files"]} == {"README.md", "main.py"}
 
 
 def test_project_profile_detects_repo_shape(tmp_path: Path) -> None:
@@ -629,7 +595,21 @@ def test_parse_github_remote_handles_ssh_https_and_non_github() -> None:
     assert yread.parse_github_remote("https://github.com/owner/repo.git") == ("owner", "repo")
     assert yread.parse_github_remote("https://github.com/owner/repo") == ("owner", "repo")
     assert yread.parse_github_remote("https://gitlab.com/owner/repo.git") is None
+    assert yread.parse_github_remote("https://notgithub.com/owner/repo.git") is None
     assert yread.parse_github_remote("not a url") is None
+
+
+def test_project_id_uses_github_origin_or_directory_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "local-project"
+    repo.mkdir()
+
+    monkeypatch.setattr(yread, "_git_remote_origin", lambda _repo: "git@github.com:Owner/Repo.git")
+    assert yread.project_id_for_repo(repo) == "Owner/Repo"
+
+    monkeypatch.setattr(yread, "_git_remote_origin", lambda _repo: "https://gitlab.com/team/repo.git")
+    assert yread.project_id_for_repo(repo) == "local-project"
 
 
 def test_git_stats_returns_none_outside_git_repo(tmp_path: Path) -> None:
@@ -796,11 +776,14 @@ def test_generate_writes_flat_output_root_and_overwrites_previous_pages(
     monkeypatch.setattr(yread, "resolve_provider", lambda _config: settings)
     monkeypatch.setattr(yread, "make_client", lambda _settings: object())
     monkeypatch.setattr(yread, "build_catalog", fake_build_catalog)
-    monkeypatch.setattr(
-        yread,
-        "generate_page",
-        lambda _client, _repo, _messages, slug, _settings, _config: f"# {slug}\n\nrun {run['count']}",
-    )
+    fail = {"enabled": False}
+
+    def fake_generate_page(_client, _repo, _messages, slug, _settings, _config):
+        if fail["enabled"]:
+            raise RuntimeError(f"failed under {repo}")
+        return f"# {slug}\n\nrun {run['count']}\n\nSource: {repo}/README.md"
+
+    monkeypatch.setattr(yread, "generate_page", fake_generate_page)
 
     args = yread.build_arg_parser().parse_args([str(repo)])
     output_root = yread.run_generate(args, config)
@@ -809,18 +792,38 @@ def test_generate_writes_flat_output_root_and_overwrites_previous_pages(
     assert (output_root / "wiki.json").is_file()
     assert (output_root / "manifest.json").is_file()
     assert (output_root / "SUMMARY.md").is_file()
-    assert (output_root / "wiki" / "1-Overview.md").read_text() == "# 1-Overview\n\nrun 1\n"
+    assert (output_root / "wiki" / "1-Overview.md").read_text() == \
+        "# 1-Overview\n\nrun 1\n\nSource: README.md\n"
     assert (output_root / "wiki" / "2-Runtime.md").is_file()
+    meta = json.loads((output_root / "wiki.json").read_text())
+    assert meta["project_id"] == "repo"
+    assert meta["status"] == "complete"
+    for path in output_root.rglob("*"):
+        if path.is_file():
+            assert str(repo) not in path.read_text(encoding="utf-8")
     assert not (output_root / "current").exists()
     assert not (output_root / "versions").exists()
 
     yread.run_generate(args, config)
 
-    assert (output_root / "wiki" / "1-Overview.md").read_text() == "# 1-Overview\n\nrun 2\n"
+    assert (output_root / "wiki" / "1-Overview.md").read_text() == \
+        "# 1-Overview\n\nrun 2\n\nSource: README.md\n"
     assert not (output_root / "wiki" / "2-Runtime.md").exists()
 
+    fail["enabled"] = True
+    yread.run_generate(args, config)
+    meta = json.loads((output_root / "wiki.json").read_text())
+    assert meta["status"] == "incomplete"
+    failed_page = (output_root / "wiki" / "1-Overview.md").read_text()
+    assert "This page failed to generate" in failed_page
+    assert "Run `yread generate` again" in failed_page
+    assert "run 2" not in failed_page
+    assert str(repo) not in failed_page
 
-def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_write_one_page_replaces_existing_page_with_failure_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     page = yread.assign_page_fields([
         {"section": "Get Started", "group": "", "title": "Overview", "level": "Beginner"}
     ])[0]
@@ -850,7 +853,8 @@ def test_write_one_page_preserves_existing_page_on_failure(tmp_path: Path, monke
 
     assert ok is False
     assert "model returned invalid output" in error
-    assert target.read_text() == "# Previous good page\n"
+    assert "This page failed to generate" in target.read_text()
+    assert "Previous good page" not in target.read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -874,10 +878,12 @@ def test_asset_inventory_buckets(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 def test_page_layout_script_and_sidebar_toggle() -> None:
-    page = viewer.PAGE.format(title="T", nav="N", body="B", scripts=viewer.LAYOUT_JS)
+    page = viewer.PAGE.format(
+        title="T", lang="en", nav="N", body="B", scripts=viewer.LAYOUT_JS
+    )
     assert "<title>T · yread</title>" in page
     assert "sb-open" in page and "yr-zoom" in page  # drawer toggle + click-to-zoom
-    assert 'id="yr-menu"' in viewer.PAGE and "@media (max-width:800px)" in viewer.PAGE
+    assert 'id="yr-menu"' in viewer.PAGE and "@media (max-width:960px)" in viewer.PAGE
 
 
 def test_build_profile_html_renders_from_meta() -> None:
@@ -894,44 +900,10 @@ def test_build_profile_html_renders_from_meta() -> None:
                         "formats": [".safetensors"], "config": "x/config.json"}],
         },
     }
-    html = viewer.build_profile_html(meta, None, "myrepo")  # repo=None -> no loc/git rows
+    html = viewer.build_profile_html(meta, "myrepo")
     assert "<h1>myrepo · Profile</h1>" in html
     assert "<table>" in html and "Generated" in html
     assert "qwen3-vl" in html and "Qwen3VLForConditionalGeneration" in html
-
-
-def test_viewer_root_redirect_handles_cjk_slug(tmp_path: Path) -> None:
-    """GET / redirects to the first page even when its slug is CJK — the redirect
-    target must be percent-encoded (HTTP headers are latin-1) and /p/ must decode."""
-    import threading
-    import urllib.request
-    from http.server import ThreadingHTTPServer
-
-    wiki = tmp_path / "wiki"
-    wiki.mkdir(parents=True)
-    slug = "1-项目概览"
-    (wiki / f"{slug}.md").write_text("# 概览\n\n正文\n", encoding="utf-8")
-    pages = [{"slug": slug, "title": "概览", "file": f"wiki/{slug}.md", "section": "S"}]
-    (tmp_path / "wiki.json").write_text(json.dumps(
-        {"schema_version": 2, "pages": pages}), encoding="utf-8")
-
-    old_sites, old_multi = viewer.Handler.__dict__.get("sites"), viewer.Handler.multi
-    viewer.Handler.multi = False
-    viewer.Handler.sites = {"": viewer.Site(tmp_path)}
-    viewer.Handler.sites[""].home_body = None  # no profile home -> / falls back to the first page
-
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), viewer.Handler)
-    port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        # urlopen follows the 302 to the encoded /p/<slug> and must land on the page
-        body = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode("utf-8")
-        assert "概览" in body
-    finally:
-        srv.shutdown()
-        viewer.Handler.multi = old_multi
-        if old_sites is not None:
-            viewer.Handler.sites = old_sites
 
 
 def test_build_profile_populates_ml_fields(tmp_path: Path) -> None:

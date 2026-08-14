@@ -248,6 +248,7 @@ YREAD_MODE=ml YREAD_DEPTH=deep yread generate /path/to/repo
 | `ENABLE_SHELL` | `1` | Expose `run_bash` to agents |
 | `OUTPUT_DIR` | `<repo>/.yread` | Default export directory |
 | `GITHUB_TOKEN` | unset | GitHub token for `profile` — raises API rate limits, unlocks private repos. Also honors the standard, unprefixed `GITHUB_TOKEN` environment variable |
+| `HUB_TARGET` | unset | Publish destination in `user@host:/absolute/path` form |
 
 For `minimax-cn` and `deepseek`, missing credentials are resolved from `~/.pi/agent/models.json` and `~/.pi/agent/auth.json` when available.
 
@@ -260,26 +261,48 @@ yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis/yread"
 yread generate /path/to/repo
 ```
 
-## Overwrite and Resume
+## Regenerate
 
-A plain `yread generate` rebuilds the catalog and overwrites the current output
-under `.yread/`. Markdown pages live in `.yread/wiki/`; `wiki.json`,
-`manifest.json`, and `SUMMARY.md` live directly under `.yread/`.
+Every `yread generate` run rebuilds the catalog and all pages, overwriting the
+current generated output under `.yread/`. Markdown pages live in `.yread/wiki/`;
+`wiki.json`, `manifest.json`, and `SUMMARY.md` live directly under `.yread/`.
 
-If a previous run was interrupted or left failed pages, explicitly resume the
-current output, regenerating only missing, failed, or source-affected pages:
+`wiki.json` records an automatic `project_id`: GitHub repositories use
+`owner/repo`, while other repositories use their directory name. Its `status` is
+`building` during generation, `complete` when every page succeeds, and
+`incomplete` when any page fails. Generated artifacts contain repository-relative
+source paths, never the local repository's absolute path.
+
+## Build Static HTML
+
+Render a completed `.yread` artifact as static HTML:
 
 ```bash
-yread generate /path/to/repo --resume
+yread build
+# or: yread build /path/to/repo/.yread
 ```
 
-Resume and browse require the current v2 wiki schema.
+The default output is `.yread-dist` beside the input. Use `--output-dir` to
+choose another local directory. Each run replaces that directory and writes a
+flat, self-contained site:
 
-Regenerate one page by slug, title, or Markdown filename:
-
-```bash
-yread generate /path/to/repo --page 1-overview
+```text
+.yread-dist/
+├── index.html
+├── 1-overview.html
+└── 2-architecture.html
 ```
+
+CSS and page behavior are embedded in every HTML file, so the pages can be
+opened directly or served by any static file server. Mermaid diagrams currently
+load Mermaid from a CDN. The project metadata required by publish is embedded
+in `index.html`, making `.yread-dist` independently movable. Build does not call
+an LLM, read the source repository, generate search indexes, or publish files.
+Built pages use a centered reading column, responsive navigation, page-local
+contents, and previous/next links. Source citations link to GitHub when the
+project ID is a GitHub `owner/repo`; local-project citations remain plain text.
+Build sanitizes generated HTML, strips executable raw markup, and only preserves
+safe link and image URL schemes before pages can be published.
 
 Disable shell access for agents (config-only):
 
@@ -287,75 +310,52 @@ Disable shell access for agents (config-only):
 yread config set ENABLE_SHELL 0
 ```
 
-## Browse Locally
+## Preview Locally
 
-The source repository is recorded in `wiki.json` at generation time, so source
-citations resolve automatically — from inside the repo, just run:
-
-```bash
-yread browse                       # serves ./.yread
-```
-
-Or point at a wiki explicitly; `--repo` overrides the recorded source root:
+Build the static site, then open its entry page directly:
 
 ```bash
-uv run yread browse /path/to/repo/.yread --host localhost --port 8000
+yread build
+open .yread-dist/index.html        # macOS
 ```
 
-## Deploy as a Website
+No local HTTP server is required. Generated artifacts deliberately do not record
+the local source repository path.
 
-Point `browse` at a directory of wikis instead of a single one and it becomes a
-multi-wiki site: each subdirectory that is a yread output (or has a default
-`.yread/` one) is mounted at `/w/<name>/`, and `/` lists every project. The
-index rescans on every visit, so uploading a new wiki needs no restart.
+## Publish to a Hub
+
+Prepare the server once with the pure-static
+[Caddy scaffold](https://github.com/cyzlmh/yread/tree/main/deploy/caddy).
+Configure its SSH destination locally, then publish the current project:
 
 ```bash
-yread browse /srv/wikis --host 127.0.0.1 --port 8000
+yread config set HUB_TARGET deploy@docs:/var/www/yread-hub
+yread publish
+# or publish an explicit built site without preparing prerequisites:
+yread publish /path/to/repo/.yread-dist
 ```
 
-Layout on the server — either shape works:
+With no directory argument, `publish` uses `.yread-dist` when it exists. If it
+does not, publish builds it from `.yread`; if neither artifact exists, publish
+runs generate first. These are existence checks only: publish does not compare
+the source repository, timestamps, or content to decide whether to regenerate.
+Passing a directory publishes that built site directly without running generate
+or build.
 
-```
-/srv/wikis/
-├── projA/wiki.json + wiki/...       # wiki dir is the project dir itself
-└── projB/.yread/wiki.json + wiki/...# or the default output layout
-```
+The final publish step reads build metadata embedded in
+`.yread-dist/index.html`, uploads the flat HTML site to
+`projects/<project_id>/`, and adds a deployment-only `project.json` for the Hub
+home page. It does not alter Caddy or restart a service. It requires `ssh` and
+`rsync` on the client and `rsync` on the server;
+authentication and custom ports belong in the normal SSH configuration. The
+remote project directory is owned by publish and synchronized with
+`rsync --delete`, so do not keep unrelated files in it.
 
-Multi-wiki mode is safe to expose publicly: source citations stay inert and
-`/src/` is closed unless you pass `--enable-source`, so a `source_root` recorded
-at generation time can't leak a source tree. Put it behind a reverse proxy for
-TLS — nginx example:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name wiki.example.com;
-    # ssl_certificate / ssl_certificate_key ...
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-    }
-}
-```
-
-And a systemd unit to keep it running:
-
-```ini
-[Unit]
-Description=yread wiki browser
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/yread browse /srv/wikis --host 127.0.0.1 --port 8000
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Publish a wiki by copying the generated `wiki.json` and `wiki/` into
-`/srv/wikis/<name>/` (e.g. `rsync -a repo/.yread/ vps:/srv/wikis/repo/`); it
-shows up on the index immediately.
+The supplied Hub homepage discovers projects through Caddy's JSON directory
+listing and filters them in the browser. There is no shared `projects.json`, so
+independent repositories can publish without contending on a global index.
+Built pages link back to the Hub root, while direct browser navigation to
+`/projects/` redirects there instead of showing Caddy's directory page.
 
 ## Codex Skill
 
@@ -386,11 +386,14 @@ The file-reading tools block common secret files such as `.env`, private keys, a
 
 ## Design Notes
 
-- No hosted service: output is local Markdown.
+- No hosted service: output is local Markdown and static HTML.
 - No AST parser: repository understanding is LLM-driven.
 - Architecture-first pages: source paths are evidence, not the page structure.
-- No symbolic incremental engine: resume uses a file-level manifest plus per-page evidence paths.
-- Standard package layout: `src/yread/core.py` for generation, `src/yread/cli.py` for CLI/config, and `src/yread/viewer.py` for the local browser.
+- Full regeneration: each run rebuilds the catalog and every page.
+- Standard package layout: `src/yread/core.py` for generation,
+  `src/yread/builder.py` for static HTML, `src/yread/publisher.py` for SSH
+  deployment, `src/yread/cli.py` for CLI/config, and `src/yread/viewer.py` for
+  HTML rendering.
 
 ## Related Projects
 

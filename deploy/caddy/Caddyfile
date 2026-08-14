@@ -1,0 +1,13 @@
+# Replace docs.example.com with the Hub hostname.
+docs.example.com {
+	root * /var/www/yread-hub
+	encode zstd gzip
+
+	@projects_page {
+		path /projects /projects/
+		not header Accept application/json
+	}
+	redir @projects_page /
+
+	file_server browse
+}

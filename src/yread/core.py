@@ -48,7 +48,7 @@ import sys
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -296,11 +296,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Repository to analyze (default: current directory)")
     p.add_argument("--env-file", type=Path, default=None,
                    help="Optional dotenv-style config file, e.g. .env.yread")
-    p.add_argument("--resume", action="store_true", help="Resume the current wiki output")
-    p.add_argument("--page", default=None,
-                   help="Generate one page by slug, title, or markdown filename")
-    p.add_argument("--force", action="store_true",
-                   help="Regenerate pages even when output files already exist")
     p.add_argument("--output-dir", type=Path, default=None,
                    help="Yread output directory (overrides OUTPUT_DIR config)")
     p.add_argument("--depth", choices=sorted(DEPTHS), default=None,
@@ -895,7 +890,8 @@ def code_stats(repo: Path) -> dict:
     }
 
 
-GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?(?:/|$)")
+GITHUB_REMOTE_RE = re.compile(
+    r"(?:^|[@/])github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?(?:/|$)", re.IGNORECASE)
 
 
 def parse_github_remote(url: str) -> tuple[str, str] | None:
@@ -909,6 +905,17 @@ def parse_github_remote(url: str) -> tuple[str, str] | None:
     return owner, repo
 
 
+def project_id_for_repo(repo: Path) -> str:
+    """Return the stable Hub identity for ``repo`` without network access.
+
+    GitHub repositories use ``owner/repo`` from the local ``origin`` remote.
+    Everything else uses the repository directory name.
+    """
+    remote = _git_remote_origin(repo)
+    github = parse_github_remote(remote) if remote else None
+    return "/".join(github) if github else repo.resolve().name
+
+
 def _git_output(repo: Path, args: list[str], timeout: float = 5.0) -> str | None:
     """Run a read-only git command in ``repo`` and return trimmed stdout, or None
     when git is unavailable or the command fails. stdin is closed so commands like
@@ -916,7 +923,7 @@ def _git_output(repo: Path, args: list[str], timeout: float = 5.0) -> str | None
     try:
         out = subprocess.run(
             ["git", "-C", str(repo), *args],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
             check=False, stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
@@ -1016,30 +1023,6 @@ def load_manifest(output_root: Path) -> dict | None:
 def write_manifest(output_root: Path, manifest: dict) -> None:
     (output_root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def diff_manifests(previous: dict | None, current: dict | None) -> dict[str, list[str]]:
-    if not previous or not current:
-        return {"added": [], "modified": [], "removed": []}
-    old = {f["path"]: f["hash"] for f in previous.get("files", [])}
-    new = {f["path"]: f["hash"] for f in current.get("files", [])}
-    added = sorted(path for path in new if path not in old)
-    removed = sorted(path for path in old if path not in new)
-    modified = sorted(path for path, digest in new.items() if path in old and old[path] != digest)
-    return {"added": added, "modified": modified, "removed": removed}
-
-
-def _path_affects_source(source: str, changed_path: str) -> bool:
-    source = source.rstrip("/")
-    return changed_path == source or changed_path.startswith(source + "/")
-
-
-def page_sources_changed(page: dict, diff: dict[str, list[str]]) -> bool:
-    sources = page.get("evidenceFiles") or []
-    if not sources:
-        return False
-    changed = diff["added"] + diff["modified"] + diff["removed"]
-    return any(_path_affects_source(source, path) for source in sources for path in changed)
 
 
 def get_dir_structure(repo: Path, dir_path: str = ".", max_depth: int = 3) -> str:
@@ -1204,9 +1187,21 @@ def dispatch(repo: Path, name: str, args: dict, enable_shell: bool) -> str:
             return f"[error] unknown tool: {name}"
     except Exception as e:  # noqa: BLE001 — tool errors must reach the model, not crash the run
         return f"[error] {e!r}"
+    result = scrub_repo_path(result, repo)
     if len(result) > MAX_TOOL_CHARS:
         result = result[:MAX_TOOL_CHARS] + f"\n[... truncated, {len(result) - MAX_TOOL_CHARS} more chars]"
     return result
+
+
+def scrub_repo_path(text: str, repo: Path) -> str:
+    """Remove the local repository root from generated or tool-returned text."""
+    roots = {str(repo.absolute()), str(repo.resolve())}
+    for root in sorted(roots, key=len, reverse=True):
+        if not root:
+            continue
+        text = text.replace(root + "/", "").replace(root + "\\", "")
+        text = text.replace(root, ".")
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -1825,7 +1820,7 @@ def build_catalog(client: OpenAI, repo: Path, config: RuntimeConfig,
         topic_budget = max(topic_budget, min(config.max_topics, len(profile.models) + 4))
     allowed_kinds, catalog_guidance, _ = preset_for(config.mode)
     ctx = {
-        "workdir": str(repo),
+        "workdir": ".",
         "os": sys.platform,
         "lang": lang_name(config.doc_lang),
         "depth": config.depth,
@@ -1976,11 +1971,14 @@ def _summary_profile_lines(meta: dict, profile: ProjectProfile,
 def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
                      started: datetime, doc_lang: str, depth: str,
                      profile: ProjectProfile, manifest: dict,
-                     source_root: Path | None = None, mode: str = "software") -> None:
+                     source_root: Path | None = None, mode: str = "software",
+                     project_id: str | None = None, status: str = "building") -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / WIKI_PAGE_DIR).mkdir(parents=True, exist_ok=True)
     meta = {
         "schema_version": 2,
+        "project_id": project_id or project_id_for_repo(source_root or output_root.parent),
+        "status": status,
         "id": run_id,
         "generated_at": started.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "yread_version": __version__,
@@ -1989,8 +1987,7 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
         "mode": mode,
         "project_profile": asdict(profile),
         # The absolute source path is intentionally NOT persisted — wiki.json ships
-        # alongside SUMMARY.md and a local path leaks the username/layout. Pass
-        # `yread browse --repo <path>` at view time for source links / live loc-git.
+        # alongside SUMMARY.md and a local path leaks the username/layout.
         "pages": [
             {k: v for k, v in (
                 ("slug", p["slug"]), ("title", p["title"]), ("file", p["file"]),
@@ -2025,6 +2022,37 @@ def write_wiki_index(output_root: Path, pages: list[dict], run_id: str,
     write_manifest(output_root, manifest)
 
 
+def write_wiki_status(output_root: Path, status: str, project_id: str | None = None) -> None:
+    """Atomically update artifact status; create minimal metadata for a new run."""
+    path = output_root / "wiki.json"
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except json.JSONDecodeError:
+        meta = {}
+    meta.setdefault("schema_version", 2)
+    meta.setdefault("pages", [])
+    meta.pop("source_root", None)
+    if project_id is not None:
+        meta["project_id"] = project_id
+    meta["status"] = status
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def scrub_artifact_paths(output_root: Path, repo: Path) -> None:
+    """Ensure generated, shareable artifact text does not contain the repo root."""
+    paths = [output_root / "wiki.json", output_root / "manifest.json", output_root / "SUMMARY.md"]
+    paths.extend((output_root / WIKI_PAGE_DIR).glob("*.md"))
+    for path in paths:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        clean = scrub_repo_path(text, repo)
+        if clean != text:
+            path.write_text(clean, encoding="utf-8")
+
+
 def load_wiki(output_root: Path, strict: bool = True) -> tuple[list[dict], dict | None, dict] | None:
     meta_path = output_root / "wiki.json"
     if not meta_path.exists():
@@ -2041,44 +2069,11 @@ def load_wiki(output_root: Path, strict: bool = True) -> tuple[list[dict], dict 
     return pages, load_manifest(output_root), meta
 
 
-def page_matches(page: dict, selector: str | None) -> bool:
-    if not selector:
-        return True
-    needle = selector.strip().lower()
-    candidates = {
-        page.get("slug", ""),
-        page.get("title", ""),
-        page.get("file", ""),
-        Path(page.get("file", "")).stem,
-    }
-    return any(str(c).lower() == needle for c in candidates)
-
-
-def page_needs_generation(output_root: Path, page: dict, force: bool,
-                          manifest_diff: dict[str, list[str]] | None = None) -> bool:
-    if force:
-        return True
-    path = output_root / page["file"]
-    if not path.exists():
-        return True
-    content = path.read_text(encoding="utf-8", errors="replace").strip()
-    if not content:
-        return True
-    if "This page failed to generate" in content[:500]:
-        return True
-    return page_sources_changed(page, manifest_diff or {"added": [], "modified": [], "removed": []})
-
-
-def wiki_is_incomplete(output_root: Path, pages: list[dict]) -> bool:
-    """A wiki output is incomplete if any page is missing, empty, or failed."""
-    return any(page_needs_generation(output_root, p, False) for p in pages)
-
-
 def page_messages(repo: Path, config: RuntimeConfig, tree: str,
                   pages: list[dict], page: dict) -> list[dict]:
     _, _, page_guidance = preset_for(config.mode)
     ctx = {
-        "workdir": str(repo),
+        "workdir": ".",
         "os": sys.platform,
         "lang": lang_name(config.doc_lang),
         "depth": config.depth,
@@ -2111,7 +2106,8 @@ def write_one_page(settings: LLMSettings, config: RuntimeConfig, repo: Path,
     target = output_root / page["file"]
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        blog = generate_page(client, repo, messages, page["slug"], settings, config)
+        blog = scrub_repo_path(
+            generate_page(client, repo, messages, page["slug"], settings, config), repo)
         # Deterministic mermaid repair: quote unquoted labels that contain
         # lexer-breaking characters (@ { } | ( ), a leading ``[/``, or a
         # fullwidth colon in a subgraph title). Runs on every page, in-flow,
@@ -2124,36 +2120,21 @@ def write_one_page(settings: LLMSettings, config: RuntimeConfig, repo: Path,
         target.write_text(blog + "\n", encoding="utf-8")
     except Exception as e:  # noqa: BLE001 — one bad page must not abort the whole wiki
         ok, error = False, repr(e)
-        existing = target.read_text(encoding="utf-8", errors="replace").strip() if target.exists() else ""
-        if not existing or "This page failed to generate" in existing[:500]:
-            blog = f"# {page['title']}\n\n> This page failed to generate: {e!r}\n\nRun again with `--resume` to retry this page."
-            target.write_text(blog + "\n", encoding="utf-8")
+        detail = scrub_repo_path(repr(e), repo)
+        blog = (f"# {page['title']}\n\n> This page failed to generate: {detail}\n\n"
+                "Run `yread generate` again to regenerate the wiki.")
+        target.write_text(blog + "\n", encoding="utf-8")
     return page["slug"], ok, error
 
 
-def plan_pages(output_root: Path, pages: list[dict], selector: str | None,
-               force: bool, manifest_diff: dict[str, list[str]] | None = None) -> tuple[list[dict], list[dict]]:
-    matched = [p for p in pages if page_matches(p, selector)]
-    if selector and not matched:
-        choices = ", ".join(p["slug"] for p in pages[:10])
-        raise SystemExit(f"no page matched {selector!r}; available slugs include: {choices}")
-    todo = [
-        p for p in matched
-        if page_needs_generation(output_root, p, force or bool(selector), manifest_diff)
-    ]
-    skipped = [p for p in matched if p not in todo]
-    return todo, skipped
-
-
 def generate_pages(settings: LLMSettings, config: RuntimeConfig, repo: Path,
-                   output_root: Path, tree: str, pages: list[dict],
-                   todo: list[dict]) -> tuple[int, int]:
+                   output_root: Path, tree: str, pages: list[dict]) -> tuple[int, int]:
     completed = failed = 0
-    if not todo:
+    if not pages:
         return completed, failed
-    workers = min(config.concurrency, len(todo))
+    workers = min(config.concurrency, len(pages))
     if workers == 1:
-        for p in todo:
+        for p in pages:
             print(f"  - ({p['index']}/{len(pages)}) {p['title']} -> {p['file']}", flush=True)
             _slug, ok, error = write_one_page(settings, config, repo, output_root, tree, pages, p)
             completed += int(ok)
@@ -2165,7 +2146,7 @@ def generate_pages(settings: LLMSettings, config: RuntimeConfig, repo: Path,
     print(f"      concurrency: {workers}", flush=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {}
-        for p in todo:
+        for p in pages:
             print(f"  - ({p['index']}/{len(pages)}) {p['title']} -> {p['file']}", flush=True)
             fut = pool.submit(write_one_page, settings, config, repo, output_root, tree, pages, p)
             futures[fut] = p
@@ -2204,39 +2185,22 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         raise SystemExit(f"not a directory: {repo}")
     output_root = config.output_dir.resolve() if config.output_dir else repo / ".yread"
     output_root.mkdir(parents=True, exist_ok=True)
+    project_id = project_id_for_repo(repo)
+    previous = load_wiki(output_root, strict=False)
+    previous_pages = previous[0] if previous else []
+    write_wiki_status(output_root, "building", project_id)
 
-    current_manifest = build_file_manifest(repo)
-    current_profile = build_project_profile(repo)
-    tree = get_dir_structure(repo, ".", 2)
-    resume = args.resume
-    existing = load_wiki(output_root) if (resume or args.page) else None
-    manifest_diff = {"added": [], "modified": [], "removed": []}
-    changed_count = 0
-
-    settings: LLMSettings | None = None
-    if existing:
-        pages, previous_manifest, meta = existing
-        config = replace(config, depth=str(meta["depth"]))
-        manifest_diff = diff_manifests(previous_manifest, current_manifest)
-        print(f"[1/2] reusing catalog from {output_root}", flush=True)
-        print(f"      {len(pages)} topics", flush=True)
-        changed_count = sum(len(v) for v in manifest_diff.values())
-        if changed_count:
-            print(f"      source changes: {changed_count} file(s)", flush=True)
-    else:
-        if resume:
-            raise SystemExit(f"no wiki output found under {output_root}; run without --resume to create it")
-        if args.page:
-            raise SystemExit(f"no wiki output found under {output_root}; run without --page to create it")
-        previous = load_wiki(output_root, strict=False)
-        previous_pages = previous[0] if previous else []
+    try:
+        current_manifest = build_file_manifest(repo)
+        current_profile = build_project_profile(repo)
+        tree = get_dir_structure(repo, ".", 2)
         settings = resolve_provider(config)
         client = make_client(settings)
         print(
             f"[1/2] building catalog for {repo} via {settings.provider}:{settings.model} @ {settings.base_url}",
             flush=True,
         )
-        print(f"      depth: {config.depth} · mode: {config.mode}", flush=True)
+        print(f"      project: {project_id} · depth: {config.depth} · mode: {config.mode}", flush=True)
         if config.mode == "skill" and not current_profile.skills:
             raise SystemExit(
                 f"no SKILL.md found under {repo}; mode 'skill' requires an agent-skill repository")
@@ -2249,31 +2213,23 @@ def run_generate(args: argparse.Namespace, config: RuntimeConfig) -> Path:
         run_id = started.astimezone().strftime("%Y-%m-%d-%H%M%S")
         write_wiki_index(output_root, pages, run_id, started, config.doc_lang,
                          config.depth, current_profile, current_manifest,
-                         source_root=repo, mode=config.mode)
+                         source_root=repo, mode=config.mode, project_id=project_id)
         cleanup_removed_pages(output_root, previous_pages, pages)
 
-    force_pages = args.force or not existing
-    todo, skipped = plan_pages(output_root, pages, args.page, force_pages, manifest_diff)
-    for p in skipped:
-        print(f"  - skip existing {p['title']} -> {p['file']}", flush=True)
+        print(f"[2/2] writing {len(pages)} page(s)", flush=True)
+        completed, failed = generate_pages(settings, config, repo, output_root, tree, pages)
+        scrub_artifact_paths(output_root, repo)
+        status = "complete" if failed == 0 else "incomplete"
+        write_wiki_status(output_root, status, project_id)
+    except KeyboardInterrupt:
+        scrub_artifact_paths(output_root, repo)
+        raise
+    except BaseException:
+        scrub_artifact_paths(output_root, repo)
+        write_wiki_status(output_root, "incomplete", project_id)
+        raise
 
-    # Phase 2: one fresh conversation per page -------------------------------
-    print(f"[2/2] writing {len(todo)} page(s)", flush=True)
-    if todo:
-        settings = settings or resolve_provider(config)
-        completed, failed = generate_pages(settings, config, repo, output_root, tree, pages, todo)
-    else:
-        completed = failed = 0
-    if existing and not args.page and failed == 0:
-        if changed_count and not any(p.get("evidenceFiles") for p in pages):
-            print("      manifest not updated: current catalog has no evidenceFiles", flush=True)
-        else:
-            write_manifest(output_root, current_manifest)
-    elif existing and args.page:
-        print("      manifest not updated after single-page regeneration", flush=True)
-    if failed:
-        print("      re-run `yread generate --resume` to retry failed pages", flush=True)
-    print(f"\ndone -> {output_root} ({completed} completed, {failed} failed, {len(skipped)} skipped)", flush=True)
+    print(f"\ndone -> {output_root} ({completed} completed, {failed} failed; {status})", flush=True)
     return output_root
 
 

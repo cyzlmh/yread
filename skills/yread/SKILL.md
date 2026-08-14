@@ -1,11 +1,11 @@
 ---
 name: yread
-description: Use when a user wants to generate an architecture-first Markdown wiki from a local source repository with yread, export that wiki to a notes directory such as Obsidian, resume or regenerate yread output, configure yread, or browse an existing yread wiki.
+description: Use when a user wants to generate an architecture-first Markdown wiki from a local source repository with yread, build, preview, or publish it as static HTML, export that wiki to a notes directory such as Obsidian, regenerate yread output, or configure yread.
 ---
 
 # yread
 
-Use this skill when the user wants to turn a local source repository into an architecture-first Markdown wiki, export that wiki to a notes directory such as Obsidian, resume a previous yread run, or browse an existing yread wiki.
+Use this skill when the user wants to turn a local source repository into an architecture-first Markdown wiki, build or publish its static HTML, export that wiki to a notes directory such as Obsidian, or regenerate the output.
 
 ## What yread Does
 
@@ -45,22 +45,35 @@ yread config set OUTPUT_DIR "/path/to/Obsidian Vault/Code Wikis/project"
 yread generate /path/to/repo
 ```
 
-Resume the current wiki output:
+Running the command again rebuilds the catalog and all pages, overwriting the
+previous generated output.
+
+Build a completed wiki as flat, self-contained HTML files:
 
 ```bash
-yread generate /path/to/repo --resume
+yread build /path/to/repo/.yread
 ```
 
-Regenerate one page:
+The default output is `.yread-dist` beside the input. Build only renders local
+HTML; it does not generate search indexes or publish the site.
+
+Publish the built site to a preconfigured static Hub:
 
 ```bash
-yread generate /path/to/repo --page <slug-or-title>
+yread config set HUB_TARGET deploy@docs:/var/www/yread-hub
+yread publish
 ```
 
-Browse a wiki (source repo auto-resolved from wiki.json; `--repo` overrides):
+With no argument, publish uses `.yread-dist` when present, otherwise builds from
+`.yread`, and runs generate first only when neither artifact exists. It checks
+existence only and does not detect source repository changes. Passing an
+explicit built directory publishes it directly without preparing prerequisites.
+
+Preview a built wiki directly:
 
 ```bash
-yread browse /path/to/wiki
+yread build /path/to/repo/.yread
+open /path/to/repo/.yread-dist/index.html
 ```
 
 ## Configuration
@@ -91,6 +104,7 @@ MAX_STEPS=24
 MAX_TOPICS=30
 CONCURRENCY=1
 ENABLE_SHELL=1
+HUB_TARGET=deploy@docs:/var/www/yread-hub
 ```
 
 Precedence is: process environment, `--env-file`, `~/.yread/config.env`, defaults.
@@ -100,8 +114,9 @@ Precedence is: process environment, `--env-file`, `~/.yread/config.env`, default
 1. Confirm the target repository path exists.
 2. Check `yread config show` when the user expects saved provider, language, or export settings.
 3. For Obsidian export, set `yread config set OUTPUT_DIR ...` (config-driven, no per-run flag).
-4. Use `--resume` when an existing v2 output exists and the user wants incremental completion.
-5. Use `yread browse` only when the user wants browser inspection; generation itself writes Markdown files directly.
+4. Before publish, require a configured `HUB_TARGET`; let argument-free publish
+   prepare missing local artifacts.
+5. For local inspection, build first and open `.yread-dist/index.html` directly.
 
 ## Privacy Note
 

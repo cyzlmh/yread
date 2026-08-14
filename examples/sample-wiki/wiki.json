@@ -1,9 +1,11 @@
 {
   "schema_version": 2,
+  "project_id": "sample-wiki",
+  "status": "complete",
   "id": "sample",
   "generated_at": "2026-06-29T00:00:00.000000Z",
   "language": "en",
-  "doc_depth": "brief",
+  "depth": "brief",
   "project_profile": {
     "total_files": 8,
     "source_files": 3,
@@ -21,7 +23,6 @@
       "src/yread/cli.py"
     ]
   },
-  "source_root": "",
   "pages": [
     {
       "slug": "1-overview",

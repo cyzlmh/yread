@@ -1,57 +1,58 @@
-"""view — browse a yread wiki in the browser, the way zread's server does.
-
-    yread browse [wiki_dir] [--host localhost] [--port 8000] [--repo <repo_path>]
-
-wiki_dir defaults to ./.yread and must contain a v2 wiki.json plus Markdown
-pages under wiki/.
-
-Renders each page's markdown with mermaid diagrams, a section/group sidebar from
-wiki.json, and resolves the inter-page `[title](slug)` cross-links. Pass --repo
-to make `Sources: [file](path#Lx-Ly)` citations link to the real files (older
-wikis may still carry a `source_root` and resolve it automatically).
-
-If wiki_dir has no wiki.json of its own, its subdirectories are scanned instead
-— each child that is a yread output (or has a default `.yread/` one) is mounted
-at /w/<name>/, and `/` becomes a project index that rescans on every visit, so
-uploaded wikis appear without a restart. Multi-wiki mode is the deployment
-shape: --repo does not apply, and source citations only resolve with
---enable-source (off by default so a public site can't leak a source tree).
-"""
-import json
+"""Render yread Markdown and metadata as self-contained HTML pages."""
+import html as html_lib
 import re
-import sys
-import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 import markdown
+import nh3
+from pygments import highlight
 from pygments.formatters import HtmlFormatter
-
-
-SENSITIVE_SOURCE_NAMES = {".env", ".env.local", ".npmrc", ".pypirc", ".netrc", "auth.json", "credentials.json"}
+from pygments.lexers import TextLexer, get_lexer_by_name
+from pygments.util import ClassNotFound
 
 
 # Pygments styles for the light/dark color schemes; injected into PAGE after
 # .format() (its braces would clash with the format placeholders). The dark
-# variant is scoped under :root.dark so the theme toggle controls it.
+# variant is scoped under :root.dark so the theme toggle controls it. The
+# formatter's own .codehilite background rules are dropped: the block chrome
+# comes from the page theme so highlighting blends into it.
 def _pygments_css() -> str:
     light = HtmlFormatter(style="default").get_style_defs(".codehilite")
     dark = HtmlFormatter(style="github-dark").get_style_defs(".dark .codehilite")
-    return f"{light}\n{dark}"
+    css = f"{light}\n{dark}"
+    return re.sub(r"^(?:\.dark )?\.codehilite\s*\{[^}]*\}\n?", "", css, flags=re.MULTILINE)
 
 
 PYGMENTS_CSS = _pygments_css()
 
+HTML_CLEANER = nh3.Cleaner(
+    tags={
+        "a", "blockquote", "br", "button", "code", "del", "div", "em", "h1", "h2",
+        "h3", "h4", "h5", "h6", "hr", "img", "li", "ol", "p", "pre",
+        "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
+    },
+    clean_content_tags={"embed", "iframe", "object", "script", "style", "template"},
+    attributes={
+        "a": {"href", "target", "title"},
+        "blockquote": {"class"},
+        "button": {"class", "type"},
+        "code": {"class"},
+        "div": {"class"},
+        "h1": {"id"},
+        "h2": {"id"},
+        "h3": {"id"},
+        "h4": {"id"},
+        "h5": {"id"},
+        "h6": {"id"},
+        "img": {"alt", "src", "title"},
+        "p": {"class"},
+        "span": {"class"},
+    },
+    url_schemes={"http", "https", "mailto", "tel"},
+)
 
-def resolve_wiki(arg: str | None) -> Path:
-    root = Path(arg).resolve() if arg else Path(".yread").resolve()
-    if (root / "wiki.json").exists():
-        return root
-    raise SystemExit(f"no wiki.json under {root}")
 
-
-PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+PAGE = """<!doctype html><html lang="{lang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} · yread</title>
 <script>(function(){{var t;try{{t=localStorage.getItem("yr-theme")}}catch(e){{}}
@@ -60,56 +61,95 @@ document.documentElement.classList.add(t);}})();</script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>mermaid.initialize({{startOnLoad:true, theme:document.documentElement.classList.contains("dark")?"dark":"neutral"}});</script>
 <style>
- :root{{--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--accent:#0969da;--bg:#fff;--side:#f6f8fa;--hover:#eaeef2;--active:#ddf4ff}}
- :root.dark{{color-scheme:dark;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--accent:#58a6ff;--bg:#0d1117;--side:#161b22;--hover:#21262d;--active:#1f6feb26}}
- *{{box-sizing:border-box}} body{{margin:0;font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:var(--bg)}}
+/* Design tokens follow the VitePress default theme
+   (github.com/vuejs/vitepress, src/client/theme-default/styles/vars.css):
+   indigo brand, 3-level text grays, bg/bg-alt/bg-soft surfaces, and the
+   green/purple/yellow/red palette for alert containers. */
+ :root{{--fg:#3c3c43;--fg2:#67676c;--fg3:#929295;--bg:#fff;--bg-alt:#f6f6f7;--bg-soft:#f6f6f7;--bg-elv:#fff;--line:#e2e2e3;--border:#c2c2c4;--brand:#3451b2;--brand2:#3a5ccc;--brand-soft:#646cff24;--soft:#8e96aa24;--green:#18794e;--green-soft:#10b98124;--purple:#6f42c1;--purple-soft:#9f7aea24;--yellow:#915930;--yellow-soft:#eab30824;--red:#b8272c;--red-soft:#f43f5e24;--shadow:0 1px 2px #0000000a,0 1px 2px #0000000f}}
+ :root.dark{{color-scheme:dark;--fg:#dfdfd6;--fg2:#98989f;--fg3:#6a6a71;--bg:#1b1b1f;--bg-alt:#161618;--bg-soft:#202127;--bg-elv:#202127;--line:#2e2e32;--border:#3c3f44;--brand:#a8b1ff;--brand2:#5c73e7;--brand-soft:#646cff29;--soft:#65758529;--green:#3dd68c;--green-soft:#10b98129;--purple:#c8abfa;--purple-soft:#9f7aea29;--yellow:#f9b44e;--yellow-soft:#eab30829;--red:#f66f81;--red-soft:#f43f5e29;--shadow:0 1px 2px #00000059}}
+ *{{box-sizing:border-box}} html{{scroll-behavior:smooth}}
+ @media (prefers-reduced-motion:reduce){{html{{scroll-behavior:auto}}}}
+ body{{margin:0;font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;color:var(--fg);background:var(--bg);text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}}
+ code,pre,.code-head{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}}
  .wrap{{display:flex;min-height:100vh}}
- nav{{width:320px;flex:none;background:var(--side);border-right:1px solid var(--line);padding:18px 14px;overflow-y:auto;height:100vh;position:sticky;top:0;z-index:65}}
- nav h1{{font-size:14px;margin:4px 6px 14px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}}
- nav .sec{{font-weight:700;margin:16px 6px 6px;font-size:13px;color:var(--fg)}}
- nav .grp{{font-weight:600;margin:10px 6px 4px;font-size:12px;color:var(--muted)}}
- nav a{{display:block;padding:5px 8px;border-radius:6px;color:var(--fg);text-decoration:none;font-size:13.5px}}
- nav a:hover{{background:var(--hover)}} nav a.active{{background:var(--active);color:var(--accent);font-weight:600}}
- nav .lv{{color:var(--muted);font-size:11px;margin-left:4px}}
- main{{flex:1;min-width:0;max-width:900px;padding:36px 48px;overflow-x:auto}}
- main a{{color:var(--accent);text-decoration:none}} main a:hover{{text-decoration:underline}}
- pre{{background:var(--side);padding:14px;border-radius:8px;overflow-x:auto;font-size:13.5px}}
- code{{background:rgba(175,184,193,.2);padding:.15em .3em;border-radius:4px;font-size:85%}}
- pre code{{background:none;padding:0}}
- table{{border-collapse:collapse;margin:14px 0;display:block;overflow-x:auto}}
- th,td{{border:1px solid var(--line);padding:7px 12px}} th{{background:var(--side)}}
- .mermaid{{background:var(--side);border-radius:8px;padding:14px;margin:16px 0;text-align:center;cursor:zoom-in}}
- main img{{max-width:100%;cursor:zoom-in}}
- h1,h2,h3{{line-height:1.3}} h2{{border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em}}
- blockquote{{border-left:3px solid var(--line);margin:14px 0;padding:2px 14px;color:var(--muted)}}
- #yr-filter{{width:100%;max-width:320px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:14px;margin:4px 0 12px;background:var(--bg);color:var(--fg)}}
+ nav{{width:288px;flex:none;background:var(--bg-alt);border-right:1px solid var(--line);padding:20px 14px;overflow-y:auto;height:100vh;position:sticky;top:0;z-index:65}}
+ nav h1{{font-size:13px;font-weight:600;margin:4px 8px 12px;color:var(--fg2);letter-spacing:.05em;text-transform:uppercase}}
+ nav .sec{{font-weight:600;margin:18px 8px 6px;font-size:13px;color:var(--fg)}}
+ nav .grp{{font-weight:600;margin:10px 8px 4px;font-size:12px;color:var(--fg3)}}
+ nav a{{display:block;padding:5px 10px;border-radius:6px;color:var(--fg2);text-decoration:none;font-size:14px;transition:color .2s}}
+ nav a:hover{{color:var(--fg)}} nav a.active{{background:var(--brand-soft);color:var(--brand);font-weight:600}}
+ nav .lv{{display:inline-block;padding:1px 7px;border-radius:999px;background:var(--brand-soft);color:var(--brand);font-size:10.5px;font-weight:600;letter-spacing:.02em;margin-left:4px;vertical-align:1px}}
+ main{{flex:1;min-width:0;padding:48px clamp(24px,5vw,72px) 72px;overflow-x:hidden}}
+ article{{width:min(100%,46rem);margin:0 auto;overflow-wrap:break-word}}
+ main a{{color:var(--brand);font-weight:500;text-decoration:none;transition:color .2s}} main a:hover{{color:var(--brand2);text-decoration:underline;text-underline-offset:2px}}
+ main a:focus-visible,nav a:focus-visible,button:focus-visible{{outline:2px solid var(--brand);outline-offset:2px}}
+ article p{{margin:1em 0}} article ul,article ol{{padding-left:1.4em}} article li{{margin:.4em 0}}
+ article li::marker{{color:var(--fg3)}}
+ pre{{max-width:100%;background:var(--bg-alt);color:var(--fg2);margin:16px 0;padding:16px 20px;border:0;border-radius:8px;overflow-x:auto;font-size:.875em;line-height:1.7;overflow-wrap:normal}}
+ code{{background:var(--soft);color:var(--brand);padding:.2em .4em;border-radius:4px;font-size:.85em}}
+ pre code{{background:none;color:inherit;padding:0;font-size:inherit;overflow-wrap:normal;white-space:pre}}
+ .codehilite{{background:var(--bg-alt);border-radius:8px;margin:16px 0}}
+ .codehilite pre{{margin:0;padding:14px 20px;background:none}}
+ .code-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px 6px 20px;border-bottom:1px solid var(--line);font-size:12px;color:var(--fg2);letter-spacing:.03em;user-select:none}}
+ .code-head span{{color:var(--brand);font-weight:500}}
+ .code-copy{{border:0;background:none;color:var(--fg2);font:inherit;cursor:pointer;padding:3px 8px;border-radius:4px;transition:color .2s,background .2s}}
+ .code-copy:hover{{color:var(--fg);background:var(--soft)}}
+ table{{max-width:100%;border-collapse:collapse;margin:20px 0;display:block;overflow-x:auto;font-size:15px}}
+ th,td{{border:1px solid var(--line);padding:8px 16px}} th{{background:var(--brand-soft);font-weight:600;text-align:left}}
+ tbody tr:nth-child(even){{background:var(--bg-soft)}} tbody tr:hover{{background:var(--soft)}}
+ .mermaid{{max-width:100%;overflow-x:auto;background:var(--bg-soft);border-radius:8px;padding:16px;margin:24px 0;text-align:center;cursor:zoom-in}}
+ main img{{display:block;max-width:100%;height:auto;margin:24px auto;border-radius:8px;cursor:zoom-in}}
+ article h1,article h2,article h3,article h4,article h5,article h6{{line-height:1.35;font-weight:600;scroll-margin-top:24px}}
+ article h1{{font-size:2rem;letter-spacing:-.02em;margin:0 0 1em;background:linear-gradient(120deg,var(--brand),var(--purple));-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-fill-color:transparent}}
+ article h2{{font-size:1.5rem;letter-spacing:-.02em;border-top:1px solid var(--line);padding-top:24px;margin:48px 0 16px}}
+ article h3{{font-size:1.25rem;letter-spacing:-.01em;margin:32px 0 12px}}
+ article h4{{font-size:1rem;margin:24px 0 8px}}
+ hr{{border:0;height:1px;margin:48px 0;background:linear-gradient(90deg,var(--brand-soft),var(--line) 40%,transparent)}}
+ ::selection{{background:var(--brand-soft)}}
+ blockquote{{border-left:2px solid var(--brand-soft);margin:16px 0;padding-left:16px;color:var(--fg2)}}
+ blockquote.alert{{border:1px solid transparent;border-radius:8px;padding:12px 16px;color:var(--fg)}}
+ .alert-title{{margin:0 0 4px;font-weight:600;font-size:.92em}}
+ .alert p{{margin:.4em 0}}
+ .alert p:empty{{display:none}}
+ .alert a{{color:inherit;font-weight:600;text-decoration:underline;text-underline-offset:2px}}
+ .alert-note{{background:var(--brand-soft)}} .alert-note .alert-title{{color:var(--brand)}}
+ .alert-tip{{background:var(--green-soft)}} .alert-tip .alert-title{{color:var(--green)}}
+ .alert-important{{background:var(--purple-soft)}} .alert-important .alert-title{{color:var(--purple)}}
+ .alert-warning{{background:var(--yellow-soft)}} .alert-warning .alert-title{{color:var(--yellow)}}
+ .alert-caution{{background:var(--red-soft)}} .alert-caution .alert-title{{color:var(--red)}}
+ blockquote>:first-child{{margin-top:0}} blockquote>:last-child{{margin-bottom:0}}
+ .sources{{font-size:.82em;line-height:1.55;color:var(--fg2);margin:1.4em 0 2em}}
+ .sources a{{color:var(--fg2);text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:2px}}
+ .pager{{display:flex;justify-content:space-between;gap:16px;margin-top:64px;padding-top:24px;border-top:1px solid var(--line)}}
+ .pager a{{display:flex;flex:1;flex-direction:column;padding:12px 16px;border:1px solid var(--line);border-radius:8px;line-height:1.4;transition:border-color .2s,background .2s}}
+ .pager a:hover{{text-decoration:none;border-color:var(--brand);background:var(--bg-soft)}} .pager a:hover .pager-title{{color:var(--brand)}} .pager-next{{text-align:right;align-items:flex-end}}
+ .pager-label{{font-size:12px;color:var(--fg2);margin-bottom:4px}} .pager-title{{color:var(--fg);font-size:14px;font-weight:500}}
  nav .toc{{padding:0 6px 12px}}
  nav .toc ul{{list-style:none;margin:0;padding-left:12px}}
  nav .toc>ul{{padding-left:6px}}
- nav .toc a{{font-size:12.5px;color:var(--muted);padding:2px 8px}}
- nav .toc a:hover{{color:var(--accent)}}
- #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
- #yr-theme{{position:fixed;top:12px;right:12px;z-index:80;width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:17px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
- #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:64}}
+ nav .toc a{{font-size:13px;color:var(--fg2);padding:2px 10px}}
+ nav .toc a:hover{{color:var(--brand)}}
+ #yr-menu{{display:none;position:fixed;top:12px;left:12px;z-index:80;width:40px;height:40px;align-items:center;justify-content:center;font-size:20px;border:1px solid var(--border);border-radius:8px;background:var(--bg-elv);color:var(--fg);cursor:pointer;box-shadow:var(--shadow)}}
+ #yr-theme{{position:fixed;top:12px;right:12px;z-index:80;width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:17px;border:1px solid var(--border);border-radius:8px;background:var(--bg-elv);color:var(--fg);cursor:pointer;box-shadow:var(--shadow)}}
+ #yr-backdrop{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:64}}
  #yr-zoom{{display:none;position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.82);align-items:center;justify-content:center;padding:24px;cursor:zoom-out}}
- #yr-zoom .yr-zoom-inner{{background:var(--bg);border-radius:10px;padding:18px;max-width:96vw;max-height:94vh;overflow:auto}}
+ #yr-zoom .yr-zoom-inner{{background:var(--bg-elv);border-radius:10px;padding:18px;max-width:96vw;max-height:94vh;overflow:auto}}
  #yr-zoom .yr-zoom-inner svg{{width:min(1400px,90vw);height:auto;max-width:none}}
  #yr-zoom .yr-zoom-inner img{{max-width:90vw;max-height:88vh}}
- @media (max-width:800px){{
-   nav{{position:fixed;left:0;top:0;height:100vh;transform:translateX(-100%);transition:transform .22s ease;box-shadow:2px 0 16px rgba(0,0,0,.15)}}
+ @media (max-width:960px){{
+   nav{{width:min(288px,88vw);position:fixed;left:0;top:0;height:100vh;height:100dvh;padding-bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-100%);transition:transform .22s ease;box-shadow:var(--shadow)}}
    body.sb-open nav{{transform:translateX(0)}}
    body.sb-open #yr-backdrop{{display:block}}
    #yr-menu{{display:flex}}
-   main{{padding:64px 20px 40px;max-width:100%}}
-   table.idx,table.idx tbody,table.idx tr,table.idx td{{display:block}}
-   table.idx thead{{display:none}}
-   table.idx tr{{border:1px solid var(--line);border-radius:8px;margin:0 0 10px;padding:8px 12px}}
-   table.idx td{{border:none;padding:2px 0}}
-   table.idx td[data-label]::before{{content:attr(data-label) ": ";color:var(--muted);font-size:12px;margin-right:4px}}
-   table.idx td:first-child{{font-weight:600}}
+   nav a{{min-height:44px;display:flex;align-items:center}}
+   nav .toc a{{min-height:36px}}
+   main{{padding:72px 18px 48px;max-width:100%}}
+   article h1{{font-size:1.75rem}}
+   article h2{{font-size:1.35rem;margin-top:40px;padding-top:20px}}
+   .pager{{gap:10px;margin-top:48px}} .pager a{{padding:11px 12px}}
  }}
 /*PYGMENTS*/
-</style></head><body><button id="yr-menu" aria-label="目录">☰</button><button id="yr-theme" aria-label="切换主题">🌙</button><div id="yr-backdrop"></div><div id="yr-zoom"><div class="yr-zoom-inner"></div></div><div class="wrap"><nav>{nav}</nav><main>{body}</main></div>{scripts}</body></html>"""
+</style></head><body><button id="yr-menu" aria-label="目录">☰</button><button id="yr-theme" aria-label="切换主题">🌙</button><div id="yr-backdrop"></div><div id="yr-zoom"><div class="yr-zoom-inner"></div></div><div class="wrap"><nav>{nav}</nav><main><article>{body}</article></main></div>{scripts}</body></html>"""
 
 
 # Sidebar drawer toggle plus click-to-zoom for diagrams and images.
@@ -150,86 +190,288 @@ LAYOUT_JS = """<script>
     zoom.addEventListener('click',close);
     document.addEventListener('keydown',function(e){if(e.key==='Escape') close();});
   }
-  // Index filter: hide table rows and sidebar links that don't match.
-  var f=document.getElementById('yr-filter');
-  if(f){
-    f.addEventListener('input',function(){
-      var q=f.value.toLowerCase();
-      document.querySelectorAll('table.idx tr, nav a.page').forEach(function(el){
-        if(el.querySelector('th')) return;
-        el.style.display = el.textContent.toLowerCase().indexOf(q)>=0 ? '' : 'none';
-      });
-    });
+  // Code blocks: copy button (the header bar itself is rendered server-side).
+  document.addEventListener('click',function(e){
+    var btn=e.target.closest('.code-copy'); if(!btn) return;
+    var box=btn.closest('.codehilite'), pre=box&&box.querySelector('pre');
+    if(!pre) return;
+    var txt=pre.innerText;
+    function done(){btn.textContent='Copied';setTimeout(function(){btn.textContent='Copy';},1600);}
+    if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(txt).then(done,fallback);}
+    else fallback();
+    function fallback(){
+      var ta=document.createElement('textarea'); ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      try{document.execCommand('copy');done();}catch(x){}
+      document.body.removeChild(ta);
+    }
+  });
+  // Instant navigation: swap the sidebar and article in place instead of doing
+  // a full page load for same-site .html links. Falls back to a normal load on
+  // any failure (e.g. file:// previews where fetch is unavailable).
+  function navigate(href,push){
+    fetch(href,{credentials:'same-origin'}).then(function(r){
+      if(!r.ok) throw new Error(r.status); return r.text();
+    }).then(function(txt){
+      var doc=new DOMParser().parseFromString(txt,'text/html');
+      var newNav=doc.querySelector('nav'), newArt=doc.querySelector('main article');
+      if(!newNav||!newArt) throw new Error('unexpected page');
+      nav.innerHTML=newNav.innerHTML;
+      var art=document.querySelector('main article');
+      art.innerHTML=newArt.innerHTML;
+      document.title=doc.title;
+      if(push) history.pushState(null,'',href);
+      var mms=art.querySelectorAll('.mermaid');
+      if(mms.length&&window.mermaid) mermaid.run({nodes:Array.prototype.slice.call(mms)});
+      var u=new URL(href,location.href);
+      var el=u.hash&&document.getElementById(decodeURIComponent(u.hash.slice(1)));
+      if(el) el.scrollIntoView(); else window.scrollTo(0,0);
+    }).catch(function(){location.href=href;});
   }
+  document.addEventListener('click',function(e){
+    if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey) return;
+    var a=e.target.closest('a[href]');
+    if(!a||a.target) return;
+    var u=new URL(a.href,location.href);
+    if(u.origin!==location.origin||!/\\.html?$/.test(u.pathname)) return;
+    if(u.pathname===location.pathname) return; // same-page anchor: default smooth scroll
+    e.preventDefault();
+    document.body.classList.remove('sb-open');
+    navigate(u.href,true);
+  });
+  window.addEventListener('popstate',function(){navigate(location.href,false);});
 })();
 </script>"""
 
 
-def build_nav(pages, active, prefix="", on_home=False):
+def build_nav(
+    pages,
+    active,
+    on_home=False,
+    page_href=None,
+    home_href=None,
+    hub_href=None,
+    toc=None,
+    language="en",
+):
     home_cls = " active" if on_home else ""
-    out = ['<h1>Wiki</h1>', f'<a class="page{home_cls}" href="{prefix}/">◈ Profile</a>']
+    home = html_lib.escape(
+        home_href if home_href is not None else "index.html", quote=True
+    )
+    out = []
+    if hub_href is not None:
+        out.append(
+            f'<a class="hub" href="{html_lib.escape(hub_href, quote=True)}">'
+            "← All projects</a>"
+        )
+    out.extend(
+        ['<h1>Wiki</h1>', f'<a class="page{home_cls}" href="{home}">◈ Profile</a>']
+    )
+    if toc:
+        toc_label = (
+            "本页目录"
+            if str(language).lower().startswith("zh")
+            else "On this page"
+        )
+        out.extend([f'<div class="sec">{toc_label}</div>', toc])
     last_sec, last_grp = None, None
     for p in pages:
         if p.get("section") != last_sec:
             last_sec = p.get("section"); last_grp = None
-            out.append(f'<div class="sec">{last_sec or ""}</div>')
+            out.append(
+                f'<div class="sec">{html_lib.escape(str(last_sec or ""))}</div>'
+            )
         grp = p.get("group")
         if grp and grp != last_grp:
-            last_grp = grp; out.append(f'<div class="grp">{grp}</div>')
+            last_grp = grp
+            out.append(f'<div class="grp">{html_lib.escape(str(grp))}</div>')
         cls = " active" if p["slug"] == active else ""
         meta = p.get("kind") or p.get("level", "")
-        lv = f'<span class="lv">{meta}</span>' if meta else ""
-        out.append(f'<a class="page{cls}" href="{prefix}/p/{quote(p["slug"])}">{p["title"]}{lv}</a>')
+        lv = (
+            f'<span class="lv">{html_lib.escape(str(meta))}</span>' if meta else ""
+        )
+        href = page_href(p["slug"]) if page_href else f'{quote(p["slug"])}.html'
+        out.append(
+            f'<a class="page{cls}" href="{html_lib.escape(href, quote=True)}">'
+            f'{html_lib.escape(str(p["title"]))}{lv}</a>'
+        )
     return "\n".join(out)
 
 
-def render_body(md_text: str, slugs: set, repo: Path | None, prefix: str = ""):
+def build_pager(pages, active, page_href=None, language="en") -> str:
+    """Return links to the pages adjacent to ``active`` in catalog order."""
+    index = next((i for i, page in enumerate(pages) if page["slug"] == active), None)
+    if index is None:
+        return ""
+    zh = str(language).lower().startswith("zh")
+
+    def link(page, css_class, label):
+        href = (
+            page_href(page["slug"])
+            if page_href
+            else f'{quote(page["slug"])}.html'
+        )
+        return (
+            f'<a class="{css_class}" href="{html_lib.escape(href, quote=True)}">'
+            f'<span class="pager-label">{label}</span>'
+            f'<span class="pager-title">{html_lib.escape(page["title"])}</span></a>'
+        )
+
+    items = []
+    if index > 0:
+        items.append(
+            link(pages[index - 1], "pager-prev", "← 上一篇" if zh else "← Previous")
+        )
+    else:
+        items.append("<span></span>")
+    if index + 1 < len(pages):
+        items.append(
+            link(pages[index + 1], "pager-next", "下一篇 →" if zh else "Next →")
+        )
+    else:
+        items.append("<span></span>")
+    return (
+        '<div class="pager" aria-label="Page navigation">'
+        + "".join(items)
+        + "</div>"
+    )
+
+
+_SOURCE_PARAGRAPH_RE = re.compile(r"<p>Sources:\s*(.*?)</p>", re.DOTALL)
+_SOURCE_LINK_RE = re.compile(r'<a href="([^"]+)">(.*?)</a>', re.DOTALL)
+_GITHUB_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _style_source_paragraphs(document: str, source_project: str | None) -> str:
+    """Style generated Sources paragraphs and make static source links useful."""
+    github = bool(source_project and _GITHUB_PROJECT_RE.fullmatch(source_project))
+
+    def paragraph(match):
+        content = match.group(1)
+        if github:
+            def github_link(link_match):
+                href = html_lib.unescape(link_match.group(1))
+                if href.startswith(("http://", "https://")):
+                    return link_match.group(0)
+                path, marker, fragment = href.partition("#")
+                kind = "tree" if path.endswith("/") else "blob"
+                url = f"https://github.com/{source_project}/{kind}/HEAD/{quote(path, safe='/')}"
+                if marker:
+                    url += "#" + quote(fragment, safe="-_:.")
+                return (
+                    f'<a href="{html_lib.escape(url, quote=True)}" target="_blank" '
+                    f'rel="noopener">{link_match.group(2)}</a>'
+                )
+            content = _SOURCE_LINK_RE.sub(github_link, content)
+        elif source_project is not None:
+            content = _SOURCE_LINK_RE.sub(lambda link: link.group(2), content)
+        return f'<p class="sources">Sources: {content}</p>'
+
+    return _SOURCE_PARAGRAPH_RE.sub(paragraph, document)
+
+
+_ALERT_BLOCK_RE = re.compile(r"<blockquote>(.*?)</blockquote>", re.DOTALL)
+_ALERT_MARKER_RE = re.compile(
+    r"(<p>)\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(?:<br\s*/?>\s*)?",
+    re.IGNORECASE,
+)
+
+
+def _style_alerts(document: str) -> str:
+    """Turn GitHub-style ``> [!NOTE]`` blockquotes into colored alert boxes.
+    Adjacent quotes merge into one <blockquote> in python-markdown, so split
+    every marker paragraph into its own alert box."""
+
+    def block(match):
+        inner = match.group(1)
+        if "<blockquote>" in inner:  # nested quotes: leave untouched
+            return match.group(0)
+        parts = _ALERT_MARKER_RE.split(inner)
+        if len(parts) == 1:
+            return match.group(0)
+        out = []
+        if parts[0].strip():
+            out.append(f"<blockquote>{parts[0]}</blockquote>")
+        for i in range(1, len(parts), 3):
+            kind = parts[i + 1].lower()
+            out.append(
+                f'<blockquote class="alert alert-{kind}">'
+                f'<p class="alert-title">{kind.capitalize()}</p>'
+                f"<p>{parts[i + 2]}</blockquote>"
+            )
+        return "".join(out)
+
+    return _ALERT_BLOCK_RE.sub(block, document)
+
+
+def render_body(
+    md_text: str,
+    slugs: set,
+    page_href=None,
+    source_project: str | None = None,
+):
     """Markdown -> (page html, toc html). The toc extension also ids every heading
     so sections are linkable; the returned toc feeds the sidebar's on-this-page block."""
-    # mermaid fences -> <div class="mermaid"> before markdown so they survive as HTML
-    def mm(m): return f'<div class="mermaid">\n{m.group(1)}\n</div>'
-    md_text = re.sub(r"```mermaid\s*\n(.*?)```", mm, md_text, flags=re.DOTALL)
+    # Fences are handled before markdown runs so the output survives as raw HTML:
+    # mermaid fences become live diagram divs, everything else is highlighted
+    # here and wrapped with a language header + copy button.
+    def fence(m):
+        lang = (m.group(1) or "").lower()
+        src = m.group(2)
+        if lang == "mermaid":
+            source = html_lib.escape(src, quote=False)
+            return f'<div class="mermaid">\n{source}\n</div>'
+        try:
+            lexer = get_lexer_by_name(lang) if lang else TextLexer()
+        except ClassNotFound:
+            lexer = TextLexer()
+        highlighted = highlight(src, lexer, HtmlFormatter(nowrap=True))
+        label = html_lib.escape(lang)
+        return (
+            '<div class="codehilite"><div class="code-head">'
+            f"<span>{label}</span>"
+            '<button class="code-copy" type="button">Copy</button></div>'
+            f"<pre>{highlighted}</pre></div>"
+        )
+    md_text = re.sub(r"```([A-Za-z][\w.+-]*)?\s*\n(.*?)```", fence, md_text, flags=re.DOTALL)
     md = markdown.Markdown(
-        extensions=["fenced_code", "tables", "sane_lists", "codehilite", "toc"],
-        extension_configs={"codehilite": {"guess_lang": False},
-                           "toc": {"toc_depth": "2-4"}})  # h1 stays out: it's the page title
+        extensions=["fenced_code", "tables", "sane_lists", "toc"],
+        extension_configs={"toc": {"toc_depth": "2-4"}})  # h1 stays out: it's the page title
     html = md.convert(md_text)
-    # rewrite inter-page links: href="slug" or "slug.md" -> "{prefix}/p/slug"
+    # Rewrite inter-page links to the corresponding flat HTML file.
     def link(m):
-        href = m.group(1); base = href[:-3] if href.endswith(".md") else href
+        href = m.group(1)
         anchor = ""
-        if "#" in base and base.split("#")[0] in slugs:
+        base = href
+        if "#" in base:
             base, anchor = base.split("#", 1); anchor = "#" + anchor
+        base = base[:-3] if base.endswith(".md") else base
         if base in slugs:
-            return f'href="{prefix}/p/{quote(base)}{anchor}"'
-        if repo and not href.startswith(("http", "/p/", f"{prefix}/p/")):  # source citation -> repo file
-            return f'href="{prefix}/src/{href}"'
+            target = page_href(base) if page_href else f"{quote(base)}.html"
+            return f'href="{target}{anchor}"'
         return m.group(0)
-    return re.sub(r'href="([^"]+)"', link, html), md.toc
+    rendered = re.sub(r'href="([^"]+)"', link, html)
+    return HTML_CLEANER.clean(
+        _style_alerts(_style_source_paragraphs(rendered, source_project))
+    ), md.toc
 
 
-def render_page(title: str, nav: str, body: str) -> str:
-    html = PAGE.format(title=title, nav=nav, body=body, scripts=LAYOUT_JS)
+def render_page(title: str, nav: str, body: str, language="zh") -> str:
+    lang = "zh" if str(language).lower().startswith("zh") else "en"
+    html = PAGE.format(
+        title=html_lib.escape(str(title)),
+        lang=lang,
+        nav=nav,
+        body=body,
+        scripts=LAYOUT_JS,
+    )
     return html.replace("/*PYGMENTS*/", PYGMENTS_CSS)
 
 
-def safe_source_path(repo: Path, rel: str) -> Path | None:
-    rel = unquote(rel).split("#")[0]
-    parts = Path(rel).parts
-    if any(part in SENSITIVE_SOURCE_NAMES or part.startswith(".env.") for part in parts):
-        return None
-    f = (repo / rel).resolve()
-    try:
-        f.relative_to(repo.resolve())
-    except ValueError:
-        return None
-    return f if f.is_file() else None
-
-
-def build_profile_html(meta: dict, repo: Path | None, name: str) -> str | None:
+def build_profile_html(meta: dict, name: str) -> str | None:
     """Render the wiki's project profile + run metadata as HTML for the home view,
-    reusing the exact SUMMARY.md formatter (loc/git included when the source repo
-    is available). Returns None if the stored profile can't be reconstructed."""
+    reusing the exact artifact-backed SUMMARY.md formatter. Returns None if the
+    stored profile can't be reconstructed."""
     import dataclasses
 
     from . import core
@@ -239,189 +481,9 @@ def build_profile_html(meta: dict, repo: Path | None, name: str) -> str | None:
         profile = core.ProjectProfile(**{k: v for k, v in pf.items() if k in fields})
     except (TypeError, ValueError):
         return None
-    code = core.code_stats(repo) if repo and repo.is_dir() else None
-    git = core.git_stats(repo) if repo and repo.is_dir() else None
-    md = "\n".join(core._summary_profile_lines(meta, profile, code=code, git=git))
-    html = markdown.markdown(md, extensions=["fenced_code", "tables", "sane_lists"])
-    return f"<h1>{name} · Profile</h1>\n{html}"
-
-
-class Site:
-    """One mounted wiki: parsed wiki.json, its source repo, and the rendered home page."""
-
-    def __init__(self, wiki: Path, repo: Path | None = None, source: bool = True):
-        meta = json.loads((wiki / "wiki.json").read_text(encoding="utf-8"))
-        if meta.get("schema_version") != 2:
-            raise SystemExit(f"unsupported wiki schema under {wiki}: expected schema_version 2")
-        if not source:
-            repo = None  # /src/ stays closed even if wiki.json records a source_root
-        elif repo is None and meta.get("source_root"):
-            recorded = Path(meta["source_root"])
-            if recorded.is_dir():
-                repo = recorded.resolve()
-        self.wiki, self.repo = wiki, repo
-        self.pages = meta["pages"]
-        self.byslug = {p["slug"]: p for p in self.pages}
-        self.name = Path(meta.get("source_root") or "").name or wiki.name or "Wiki"
-        self.generated_at = str(meta.get("generated_at", ""))[:10]
-        self.yread_version = meta.get("yread_version", "")
-        self.language = meta.get("language", "")
-        self.depth = meta.get("depth") or meta.get("doc_depth") or ""
-        self.mode = meta.get("mode", "")
-        self.home_body = build_profile_html(meta, repo, self.name)
-
-
-def find_wikis(root: Path) -> dict[str, Path]:
-    """Immediate children that are yread outputs — the child itself or its default
-    `.yread/` output dir — keyed by project name."""
-    found = {}
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        wiki = child if (child / "wiki.json").exists() else child / ".yread"
-        if (wiki / "wiki.json").exists():
-            found[child.name] = wiki
-    return found
-
-
-class Handler(BaseHTTPRequestHandler):
-    sites: dict[str, Site]  # mount name -> wiki; single-wiki mode mounts as {"": site}
-    site_mtimes: dict[str, float]  # mount name -> wiki.json mtime at load (multi mode)
-    wiki_root: Path | None = None  # scanned directory (multi mode only)
-    enable_source = False          # multi mode: resolve source_root and serve /src/
-    multi = False
-
-    def log_message(self, *a): pass
-
-    def _send(self, body: bytes, ctype="text/html; charset=utf-8", code=200):
-        self.send_response(code); self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body))); self.end_headers()
-        self.wfile.write(body)
-
-    def _index(self):
-        def row(name, site):
-            return (f'<tr><td><a href="/w/{quote(name)}/">{name}</a></td>'
-                    f'<td data-label="Lang">{site.language}</td>'
-                    f'<td data-label="Depth">{site.depth}</td>'
-                    f'<td data-label="Mode">{site.mode}</td>'
-                    f'<td data-label="Version">{site.yread_version}</td>'
-                    f'<td data-label="Pages">{len(site.pages)}</td>'
-                    f'<td data-label="Generated">{site.generated_at}</td></tr>')
-        ordered = sorted(self.sites.items(), key=lambda kv: kv[1].generated_at, reverse=True)
-        rows = "".join(row(name, site) for name, site in ordered)
-        body = ('<h1>Wikis</h1>\n'
-                '<input id="yr-filter" type="search" placeholder="Filter projects\u2026" autocomplete="off">\n'
-                '<table class="idx"><thead><tr><th>Project</th><th>Lang</th><th>Depth</th>'
-                '<th>Mode</th><th>Version</th><th>Pages</th><th>Generated</th></tr></thead>'
-                f'{rows}</table>')
-        nav = '<h1>Wikis</h1>' + "".join(
-            f'<a class="page" href="/w/{quote(name)}/">{name}</a>' for name in self.sites)
-        return render_page("Wikis · yread", nav, body)
-
-    def _serve(self, site: Site, prefix: str, path: str):
-        if path == "/":
-            if site.home_body is not None:
-                nav = build_nav(site.pages, None, prefix, on_home=True)
-                return self._send(render_page(f"{site.name} · Profile", nav, site.home_body).encode())
-            if not site.pages:
-                return self._send(b"no pages", code=404)
-            # No reconstructable profile: fall back to the first page. Slugs keep
-            # CJK/Unicode; HTTP headers are latin-1, so the target must be encoded.
-            self.send_response(302)
-            self.send_header("Location", f"{prefix}/p/" + quote(site.pages[0]["slug"]))
-            self.end_headers(); return
-        if path.startswith("/src/") and site.repo:
-            f = safe_source_path(site.repo, path[len("/src/"):])
-            if f:
-                return self._send(f.read_text(encoding="utf-8", errors="replace").encode(), "text/plain; charset=utf-8")
-            return self._send(b"not found", code=404)
-        if path.startswith("/p/"):
-            slug = unquote(path[len("/p/"):])  # browsers percent-encode CJK slugs
-            p = site.byslug.get(slug)
-            if not p:
-                return self._send(b"page not found", code=404)
-            md_text = (site.wiki / p["file"]).read_text(encoding="utf-8", errors="replace")
-            body, toc = render_body(md_text, set(site.byslug), site.repo, prefix)
-            nav = build_nav(site.pages, slug, prefix)
-            if toc:
-                nav += f'\n<div class="sec">On this page</div>\n{toc}'
-            return self._send(render_page(p["title"], nav, body).encode())
-        self._send(b"not found", code=404)
-
-    def do_GET(self):
-        path = self.path.split("?")[0]
-        if not self.multi:
-            return self._serve(self.sites[""], "", path)
-        if path == "/":
-            type(self).refresh()  # pick up uploaded/removed wikis without a restart
-            return self._send(self._index().encode())
-        m = re.match(r"^/w/([^/]+)(/.*)?$", path)
-        if m and (site := self.sites.get(unquote(m.group(1)))):
-            return self._serve(site, "/w/" + m.group(1), m.group(2) or "/")
-        self._send(b"not found", code=404)
-
-    @classmethod
-    def refresh(cls):
-        """Rescan wiki_root; reload a site only when its wiki.json changed. Builds a
-        fresh dict before swapping so concurrent requests never see a half-update."""
-        if cls.wiki_root is None:
-            return
-        sites, mtimes = dict(cls.sites), dict(cls.site_mtimes)
-        found = find_wikis(cls.wiki_root)
-        for name in list(sites):
-            if name not in found:
-                del sites[name]; mtimes.pop(name, None)
-        for name, wiki in found.items():
-            try:
-                mtime = (wiki / "wiki.json").stat().st_mtime
-            except OSError:
-                continue
-            if mtimes.get(name) == mtime:
-                continue
-            try:
-                sites[name] = Site(wiki, source=cls.enable_source)
-                mtimes[name] = mtime
-            except SystemExit as e:
-                print(f"skipping {wiki}: {e}", flush=True)
-        cls.sites = dict(sorted(sites.items()))
-        cls.site_mtimes = mtimes
-
-
-def main(argv: list[str] | None = None):
-    args = [a for a in (sys.argv[1:] if argv is None else argv)]
-    host = "localhost"; port = 8000; repo = None; wiki_arg = None; enable_source = False
-    i = 0
-    while i < len(args):
-        if args[i] == "--port": port = int(args[i + 1]); i += 2
-        elif args[i] == "--host": host = args[i + 1]; i += 2
-        elif args[i] == "--repo": repo = Path(args[i + 1]).resolve(); i += 2
-        elif args[i] == "--enable-source": enable_source = True; i += 1
-        else: wiki_arg = args[i]; i += 1
-    root = Path(wiki_arg).resolve() if wiki_arg else Path(".yread").resolve()
-    if (root / "wiki.json").exists():
-        Handler.multi = False
-        Handler.sites = {"": Site(root, repo)}
-        desc = f"{len(Handler.sites[''].pages)} pages"
-    else:
-        if repo is not None:
-            print("note: --repo is ignored when browsing multiple wikis", flush=True)
-        Handler.multi = True
-        Handler.wiki_root = root
-        Handler.enable_source = enable_source
-        Handler.sites, Handler.site_mtimes = {}, {}
-        Handler.refresh()
-        if not Handler.sites:
-            raise SystemExit(f"no wiki.json under {root} or its subdirectories")
-        desc = f"{len(Handler.sites)} projects"
-        if not enable_source:
-            print("note: /src/ source links are off in multi-wiki mode "
-                  "(--enable-source to allow)", flush=True)
-    url = f"http://{host}:{port}/"
-    print(f"yread browser: {root}\n  {desc} -> {url}  (Ctrl-C to stop)", flush=True)
-    try: webbrowser.open(url)
-    except Exception: pass
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
-
-
-if __name__ == "__main__":
-    main()
+    md = "\n".join(core._summary_profile_lines(meta, profile))
+    rendered = markdown.markdown(md, extensions=["fenced_code", "tables", "sane_lists"])
+    return (
+        f"<h1>{html_lib.escape(str(name))} · Profile</h1>\n"
+        f"{HTML_CLEANER.clean(rendered)}"
+    )

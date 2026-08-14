@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import __version__, core, viewer
+from . import __version__, builder, core, publisher
 
 
 CONFIG_DIR = Path.home() / ".yread"
@@ -28,6 +28,7 @@ CONFIG_KEYS = {
     "ENABLE_SHELL",
     "OUTPUT_DIR",
     "GITHUB_TOKEN",
+    "HUB_TARGET",
 }
 
 
@@ -59,19 +60,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    generate = sub.add_parser("generate", help="Generate or resume a repo wiki")
+    generate = sub.add_parser("generate", help="Generate a repo wiki")
     for action in _build_generate_parser()._actions:
         if action.dest == "help":
             continue
         generate._add_action(action)
 
-    browse = sub.add_parser("browse", help="Open a generated wiki in the browser")
-    browse.add_argument("wiki_dir", nargs="?", help="Yread output root")
-    browse.add_argument("--host", default="localhost", help="Host to bind")
-    browse.add_argument("--port", type=int, default=8000)
-    browse.add_argument("--repo", default=None, help="Source repository for source links")
-    browse.add_argument("--enable-source", action="store_true",
-                        help="Multi-wiki mode: serve /src/ source files from each wiki's recorded source_root")
+    build = sub.add_parser("build", help="Build a wiki as static HTML")
+    build.add_argument("wiki_dir", nargs="?", help="Yread output root (default: ./.yread)")
+    build.add_argument(
+        "--output-dir",
+        help="Static output directory (default: .yread-dist beside the input)",
+    )
+
+    publish = sub.add_parser(
+        "publish", help="Prepare missing local artifacts and publish to the configured Hub"
+    )
+    publish.add_argument(
+        "dist_dir",
+        nargs="?",
+        help="Built site directory (when given, publish it directly)",
+    )
 
     sub.add_parser("version", help="Print the version number")
 
@@ -151,19 +160,6 @@ def _run_config(args: argparse.Namespace) -> int:
         print(CONFIG_FILE)
         return 0
     raise SystemExit(f"unknown config command: {command}")
-
-
-def _run_browse(args: argparse.Namespace) -> int:
-    viewer_args = []
-    if args.wiki_dir:
-        viewer_args.append(args.wiki_dir)
-    viewer_args.extend(["--host", args.host, "--port", str(args.port)])
-    if args.repo:
-        viewer_args.extend(["--repo", args.repo])
-    if args.enable_source:
-        viewer_args.append("--enable-source")
-    viewer.main(viewer_args)
-    return 0
 
 
 def _human_bytes(n: int) -> str:
@@ -393,8 +389,35 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "config":
         return _run_config(args)
-    if args.command == "browse":
-        return _run_browse(args)
+    if args.command == "build":
+        output = builder.build_site(
+            Path(args.wiki_dir) if args.wiki_dir else Path(".yread"),
+            Path(args.output_dir) if args.output_dir else None,
+        )
+        print(f"built {output}")
+        return 0
+    if args.command == "publish":
+        target = core._env_get(_read_config(), "HUB_TARGET")
+        if not target:
+            raise SystemExit(
+                "HUB_TARGET is not configured; run yread config set "
+                "HUB_TARGET user@host:/srv/yread"
+            )
+        if args.dist_dir:
+            dist_dir = Path(args.dist_dir)
+        else:
+            dist_dir = Path(".yread-dist")
+            if not dist_dir.exists():
+                wiki_dir = Path(".yread")
+                if not wiki_dir.exists():
+                    generate_args = _build_generate_parser().parse_args([])
+                    config = core.config_from_args(generate_args, config_files=[CONFIG_FILE])
+                    wiki_dir = core.run_generate(generate_args, config)
+                dist_dir = builder.build_site(wiki_dir)
+                print(f"built {dist_dir}")
+        remote = publisher.publish_site(dist_dir, target)
+        print(f"published {remote}")
+        return 0
     if args.command == "profile":
         return _run_profile(args)
     if args.command == "generate":

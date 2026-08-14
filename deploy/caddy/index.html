@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yread</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#fff; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --card:#f6f8fa; --accent:#0969da; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --line:#30363d; --card:#161b22; --accent:#58a6ff; } }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(1100px,calc(100% - 32px)); margin:0 auto; padding:56px 0 72px; }
+    h1 { margin:0; font-size:clamp(30px,5vw,48px); letter-spacing:-.04em; }
+    .lead { color:var(--muted); margin:8px 0 32px; }
+    .controls { display:grid; grid-template-columns:minmax(220px,1fr) repeat(3,minmax(120px,180px)); gap:10px; margin-bottom:24px; }
+    input,select { width:100%; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--bg); color:var(--fg); font:inherit; }
+    .status { color:var(--muted); margin:18px 0; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:14px; }
+    .card { display:block; min-width:0; padding:18px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); text-decoration:none; }
+    .card:hover { border-color:var(--accent); }
+    .name { overflow-wrap:anywhere; font-size:18px; font-weight:650; color:var(--accent); }
+    .meta { display:flex; flex-wrap:wrap; gap:6px; margin:14px 0 10px; }
+    .tag { border:1px solid var(--line); border-radius:999px; padding:2px 8px; color:var(--muted); font-size:12px; }
+    .foot { color:var(--muted); font-size:13px; }
+    [hidden] { display:none !important; }
+    @media (max-width:760px) { .controls { grid-template-columns:1fr 1fr; } .controls input { grid-column:1/-1; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>yread</h1>
+    <p class="lead">Generated documentation, collected in one place.</p>
+    <div class="controls">
+      <input id="query" type="search" placeholder="Filter projects…" autocomplete="off">
+      <select id="language"><option value="">All languages</option></select>
+      <select id="mode"><option value="">All modes</option></select>
+      <select id="depth"><option value="">All depths</option></select>
+    </div>
+    <p id="status" class="status">Loading projects…</p>
+    <div id="projects" class="grid"></div>
+  </main>
+  <script>
+  (function () {
+    var projects = [], grid = document.getElementById("projects"), status = document.getElementById("status");
+    var query = document.getElementById("query"), language = document.getElementById("language");
+    var mode = document.getElementById("mode"), depth = document.getElementById("depth");
+
+    function childPath(parent, entry) {
+      var url = new URL(entry.url || entry.name, new URL(parent, location.origin));
+      return url.pathname.replace(/\/?$/, "/");
+    }
+
+    async function walk(path) {
+      var meta = await fetch(path + "project.json", {cache:"no-store"});
+      if (meta.ok) {
+        var project = await meta.json();
+        project.href = path;
+        projects.push(project);
+        return;
+      }
+      var listing = await fetch(path, {headers:{Accept:"application/json"}, cache:"no-store"});
+      if (!listing.ok) throw new Error("Cannot list " + path);
+      var entries = await listing.json();
+      await Promise.all(entries.filter(function (entry) { return entry.is_dir; })
+        .map(function (entry) { return walk(childPath(path, entry)); }));
+    }
+
+    function addOptions(select, field) {
+      Array.from(new Set(projects.map(function (p) { return p[field]; }).filter(Boolean))).sort()
+        .forEach(function (value) {
+          var option = document.createElement("option");
+          option.value = option.textContent = value;
+          select.appendChild(option);
+        });
+    }
+
+    function tag(value) {
+      var el = document.createElement("span");
+      el.className = "tag";
+      el.textContent = value;
+      return el;
+    }
+
+    function render() {
+      var text = query.value.trim().toLowerCase();
+      var visible = projects.filter(function (p) {
+        return (!text || String(p.project_id).toLowerCase().includes(text)) &&
+          (!language.value || p.language === language.value) &&
+          (!mode.value || p.mode === mode.value) &&
+          (!depth.value || p.depth === depth.value);
+      });
+      grid.replaceChildren();
+      visible.forEach(function (p) {
+        var card = document.createElement("a");
+        card.className = "card";
+        card.href = p.href;
+        var name = document.createElement("div");
+        name.className = "name";
+        name.textContent = p.project_id;
+        var meta = document.createElement("div");
+        meta.className = "meta";
+        [p.language, p.mode, p.depth].filter(Boolean).forEach(function (value) { meta.appendChild(tag(value)); });
+        var foot = document.createElement("div");
+        foot.className = "foot";
+        foot.textContent = (p.pages || 0) + " pages" + (p.generated_at ? " · " + p.generated_at.slice(0, 10) : "");
+        card.append(name, meta, foot);
+        grid.appendChild(card);
+      });
+      status.textContent = visible.length + " of " + projects.length + " projects";
+    }
+
+    Promise.resolve(walk("/projects/"))
+      .then(function () {
+        projects.sort(function (a, b) { return String(b.generated_at).localeCompare(String(a.generated_at)); });
+        addOptions(language, "language"); addOptions(mode, "mode"); addOptions(depth, "depth");
+        [query, language, mode, depth].forEach(function (el) { el.addEventListener("input", render); });
+        render();
+      })
+      .catch(function (error) { status.textContent = error.message; });
+  })();
+  </script>
+</body>
+</html>
