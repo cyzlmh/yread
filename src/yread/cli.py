@@ -285,6 +285,27 @@ def _render_languages(langs: list[dict]) -> None:
         _row(_clip(s["language"], _LABEL), f"{s['loc']:,}", f"{bar} {pct}")
 
 
+def _format_token_estimate(tokens: int) -> str:
+    if tokens >= 1_000:
+        return f"~{tokens / 1_000:.1f}k"
+    return f"~{tokens}"
+
+
+def _render_documentation(docs: dict) -> None:
+    _section("DOCUMENTATION")
+    _row("Markdown files", f"{docs['files']:,}")
+    _row("Raw content", f"{docs['characters']:,}",
+         _dim(f"characters · {docs['lines']:,} lines"))
+    _row("Est. LLM input", _format_token_estimate(docs["estimated_tokens"]), _dim("tokens"))
+    languages = []
+    if docs["chinese_chars"]:
+        languages.append(f"Chinese {docs['chinese_pct']}%")
+    if docs["english_chars"]:
+        languages.append(f"English {docs['english_pct']}%")
+    if languages:
+        _row("Language", "", _dim(" · ".join(languages)))
+
+
 def _render_assets(assets: dict) -> None:
     _section("ASSETS")
     for bucket in ("weights", "configs", "data"):
@@ -322,6 +343,7 @@ def _run_profile(args: argparse.Namespace) -> int:
     config = _read_config()
     languages = core.language_stats(repo)
     code = core.code_stats(repo)
+    docs = core.documentation_stats(repo)
     assets = core.asset_inventory(repo)
     stats = core.git_stats(repo)
     gh = core.github_repo_info(repo, token=core._env_get(config, "GITHUB_TOKEN"))
@@ -346,6 +368,8 @@ def _run_profile(args: argparse.Namespace) -> int:
 
     if languages:
         _render_languages(languages)
+    if docs["files"]:
+        _render_documentation(docs)
 
     # Surface assets only when they carry weight — model or data artifacts. A
     # couple of config yamls in a plain software repo are noise, not signal.

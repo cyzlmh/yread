@@ -117,6 +117,11 @@ are skipped, so the numbers track the team's own logic. The `LANGUAGES` section
 lists each language's core code lines and sums to `Lines of code`. Tests are
 counted separately and shown as a ratio of core code.
 
+When a repository contains Markdown, `DOCUMENTATION` separately reports its raw
+content size, a rough LLM input-token estimate, and the Chinese/English prose
+mix. It is a reader-friendly input-size signal, not a provider bill or an exact
+context-window count.
+
 For any git repository the `REPOSITORY` section adds commit count, history span
 (first/last commit dates), commits in the last 30 days, contributor count,
 latest tag, and whether the working tree is dirty — all from local git, no

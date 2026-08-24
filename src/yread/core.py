@@ -92,6 +92,10 @@ ML_TOPIC_KINDS = {
 }
 REQUIRED_TOPIC_KINDS = {"overview"}
 
+MARKDOWN_EXTENSIONS = {".md", ".markdown"}
+
+# These are intentionally separate from ``SOURCE_EXTENSIONS``: documentation is
+# profiled as reader-facing content, not as source code.
 SOURCE_EXTENSIONS = {
     ".py": "Python",
     ".js": "JavaScript",
@@ -887,6 +891,101 @@ def code_stats(repo: Path) -> dict:
         "test_files": test_files,
         "test_loc": test_loc,
         "test_ratio": round(test_loc / core_loc, 2) if core_loc else 0.0,
+    }
+
+
+_MARKDOWN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ebef]")
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
+
+
+def _markdown_prose_and_code(text: str) -> tuple[str, str]:
+    """Split Markdown into prose and fenced code, preserving raw characters.
+
+    This deliberately recognizes only standard backtick/tilde fences. It is a
+    small, dependency-free distinction for profile metrics, not a Markdown
+    parser.
+    """
+    prose: list[str] = []
+    code: list[str] = []
+    fence: tuple[str, int] | None = None
+
+    for line in text.splitlines(keepends=True):
+        match = _MARKDOWN_FENCE_RE.match(line)
+        if fence is None:
+            if match:
+                marker = match.group(1)
+                fence = (marker[0], len(marker))
+                code.append(line)
+            else:
+                prose.append(line)
+        elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1]:
+            code.append(line)
+            fence = None
+        else:
+            code.append(line)
+    return "".join(prose), "".join(code)
+
+
+def documentation_stats(repo: Path) -> dict:
+    """Return reader-facing Markdown metrics for ``yread profile``.
+
+    ``characters`` and ``lines`` describe the raw Markdown input, including
+    syntax and code examples. The language mix excludes fenced code blocks so
+    identifiers do not masquerade as English prose. ``estimated_tokens`` is a
+    deliberately rough, dependency-free LLM input-size indication — useful for
+    a human scan, not a provider bill or context-limit check.
+    """
+    files = characters = lines = 0
+    chinese_chars = english_chars = english_words = other_chars = code_chars = 0
+
+    for path in iter_source_files(repo):
+        if path.suffix.lower() not in MARKDOWN_EXTENSIONS:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        files += 1
+        characters += len(text)
+        lines += len(text.splitlines())
+        prose, code = _markdown_prose_and_code(text)
+        code_chars += len(code)
+
+        word_positions: set[int] = set()
+        for match in _ENGLISH_WORD_RE.finditer(prose):
+            english_words += 1
+            word_positions.update(range(match.start(), match.end()))
+        han_positions = {match.start() for match in _HAN_RE.finditer(prose)}
+        chinese_chars += len(han_positions)
+        english_chars += sum(1 for index in word_positions if prose[index].isalpha())
+        other_chars += sum(
+            1 for index, char in enumerate(prose)
+            if not char.isspace() and index not in word_positions and index not in han_positions
+        )
+
+    language_chars = chinese_chars + english_chars
+    chinese_pct = round(chinese_chars / language_chars * 100) if language_chars else 0
+    english_pct = 100 - chinese_pct if language_chars else 0
+    # A model-independent approximation for a quick profile scan. Chinese text,
+    # English subwords, Markdown punctuation, and code tend to tokenize at
+    # different densities; exact counts require the selected model's tokenizer.
+    estimated_tokens = round(
+        chinese_chars * 1.5
+        + english_words * 1.3
+        + other_chars * 0.5
+        + code_chars * 0.25
+    )
+    return {
+        "files": files,
+        "characters": characters,
+        "lines": lines,
+        "estimated_tokens": estimated_tokens,
+        "chinese_chars": chinese_chars,
+        "english_chars": english_chars,
+        "chinese_pct": chinese_pct,
+        "english_pct": english_pct,
     }
 
 

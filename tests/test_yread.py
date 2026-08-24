@@ -472,7 +472,9 @@ def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
     assert cli.main(["profile", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert str(tmp_path) in out  # repo path in the header
-    assert "CODE" in out and "LANGUAGES" in out
+    assert "CODE" in out and "LANGUAGES" in out and "DOCUMENTATION" in out
+    assert "Raw content" in out and "Est. LLM input" in out
+    assert "English 100%" in out
     assert "Python" in out  # single-language line
     assert "pyproject.toml" in out  # Structure row
     assert "src/demo/cli.py" in out  # Entry row
@@ -500,6 +502,26 @@ def test_language_stats_counts_files_and_lines(tmp_path: Path) -> None:
     assert langs["TypeScript"]["loc"] == 2  # blank line excluded
     # sorted by code loc descending (Python 3 before TypeScript 2)
     assert [s["language"] for s in stats] == ["Python", "TypeScript"]
+
+
+def test_documentation_stats_counts_markdown_and_excludes_fenced_code_from_language(tmp_path: Path) -> None:
+    readme = "# 中文说明\n\nHello world!\n```python\nprint('skip')\n```\n"
+    guide = "更多 English text"  # one line even without a trailing newline
+    (tmp_path / "README.md").write_text(readme, encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.MARKDOWN").write_text(guide, encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "ignored.md").write_text("ignored", encoding="utf-8")
+
+    stats = yread.documentation_stats(tmp_path)
+
+    assert stats["files"] == 2
+    assert stats["characters"] == len(readme) + len(guide)
+    assert stats["lines"] == len(readme.splitlines()) + len(guide.splitlines())
+    assert stats["chinese_chars"] == 6
+    assert stats["english_chars"] == len("HelloworldEnglishtext")
+    assert (stats["chinese_pct"], stats["english_pct"]) == (22, 78)
+    assert stats["estimated_tokens"] > 0
 
 
 def test_code_stats_splits_code_blank_and_tests(tmp_path: Path) -> None:
