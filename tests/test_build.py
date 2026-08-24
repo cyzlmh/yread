@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -96,7 +97,8 @@ def test_build_site_writes_flat_self_contained_html(tmp_path: Path) -> None:
     assert 'class="pager-prev" href="1-%E6%A6%82%E8%A7%88.html"' in details
     assert not (output / "assets").exists()
     assert not (output / "p").exists()
-    assert stat.S_IMODE(output.stat().st_mode) == 0o755
+    if os.name != "nt":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o755
 
 
 def test_build_non_github_sources_are_text_not_broken_links(tmp_path: Path) -> None:
