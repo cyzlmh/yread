@@ -21,6 +21,14 @@ request used for discovery is left unchanged.
 
 ## Install
 
+> **NOTE (2026-09)**: On yzchen.space, this scaffold is **reference only** —
+> never install it as `/etc/caddy/Caddyfile`. The live `yread.yzchen.space`
+> site block is owned by the **mypaas repo** and deployed via its controlled
+> pipeline (validate -> backup -> atomic replace -> reload -> probe ->
+> rollback; see `mypaas/caddy/README.md`). This project deploys content only
+> (`/var/www/yread-hub`, rsync) and must never touch `/etc/caddy`.
+> The steps below apply only to a fresh, standalone host.
+
 1. Install Caddy and create a deployment user with SSH access.
    Install `rsync` on the server as well.
 2. Copy `index.html` to `/var/www/yread-hub/index.html`.

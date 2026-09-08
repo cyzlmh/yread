@@ -1,4 +1,15 @@
 # Replace docs.example.com with the Hub hostname.
+#
+# NOTE (2026-09): This scaffold is REFERENCE ONLY — do NOT install it as
+# /etc/caddy/Caddyfile. On yzchen.space the live site block for
+# yread.yzchen.space lives in the mypaas repo
+# (mypaas/caddy/caddyfiles/tencloud-gz.Caddyfile) and is the single source
+# of truth. Config changes go through mypaas: edit the Caddyfile there,
+# commit/push, then run `caddy/deploy.sh` (validate -> backup -> atomic
+# replace -> reload -> probe -> rollback). See mypaas/caddy/README.md.
+#
+# This project only deploys CONTENT under /var/www/yread-hub (rsync);
+# it must never touch /etc/caddy.
 docs.example.com {
 	root * /var/www/yread-hub
 	encode zstd gzip
