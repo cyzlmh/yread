@@ -487,7 +487,13 @@ def test_cli_profile_prints_profile_and_resolved_depth(tmp_path: Path,
     assert "GitHub" not in out  # tmp_path is not a git repo -> no network
 
 
-def test_language_stats_counts_files_and_lines(tmp_path: Path) -> None:
+@pytest.fixture
+def builtin_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep legacy-backend expectations independent of the host's installed tools.
+    monkeypatch.setattr(yread.shutil, "which", lambda _name: None)
+
+
+def test_language_stats_counts_files_and_lines(tmp_path: Path, builtin_counter: None) -> None:
     (tmp_path / "a.py").write_text("print('a')\nprint('b')\n")      # 2 lines
     (tmp_path / "b.py").write_text("x = 1\n")                        # 1 line
     (tmp_path / "c.ts").write_text("const a = 1;\n\nconst b = 2;\n")  # 3 lines
@@ -524,7 +530,7 @@ def test_documentation_stats_counts_markdown_and_excludes_fenced_code_from_langu
     assert stats["estimated_tokens"] > 0
 
 
-def test_code_stats_splits_code_blank_and_tests(tmp_path: Path) -> None:
+def test_code_stats_splits_code_blank_and_tests(tmp_path: Path, builtin_counter: None) -> None:
     (tmp_path / "core.py").write_text("x = 1\n\n\ny = 2\n")            # 4 loc, 2 code, 2 blank
     (tmp_path / "small.py").write_text("z = 3\n")                     # 1 loc, 1 code
     (tmp_path / "tests").mkdir()
@@ -540,7 +546,7 @@ def test_code_stats_splits_code_blank_and_tests(tmp_path: Path) -> None:
     assert stats["avg_file_loc"] == round(3 / 2)   # core code lines / core files
 
 
-def test_code_stats_excludes_comments_across_languages(tmp_path: Path) -> None:
+def test_code_stats_excludes_comments_across_languages(tmp_path: Path, builtin_counter: None) -> None:
     (tmp_path / "a.java").write_text(
         "/*\n"
         " * license header\n"

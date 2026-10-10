@@ -341,8 +341,9 @@ def _run_profile(args: argparse.Namespace) -> int:
     repo = Path(args.repo_path).resolve()
     profile = core.build_project_profile(repo)
     config = _read_config()
-    languages = core.language_stats(repo)
-    code = core.code_stats(repo)
+    source = core.source_stats(repo)
+    languages = source["languages"]
+    code = source["code"]
     docs = core.documentation_stats(repo)
     assets = core.asset_inventory(repo)
     stats = core.git_stats(repo)
@@ -353,6 +354,7 @@ def _run_profile(args: argparse.Namespace) -> int:
 
     _section("CODE")
     _row("Lines of code", f"{code['core_loc']:,}", _dim("excludes blanks and comments"))
+    _row("Counter", "", _dim("cloc" if source["backend"] == "cloc" else "builtin heuristic (fallback)"))
     _row("Source files", f"{code['core_files']:,}",
          _dim(f"of {profile.total_files:,} files · {profile.max_depth} levels deep"))
     if code["avg_file_loc"]:

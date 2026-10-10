@@ -117,6 +117,18 @@ are skipped, so the numbers track the team's own logic. The `LANGUAGES` section
 lists each language's core code lines and sums to `Lines of code`. Tests are
 counted separately and shown as a ratio of core code.
 
+Code-line counting prefers [cloc](https://github.com/AlDanial/cloc) when its
+`cloc` executable is on `PATH`. Install it optionally with `brew install cloc`
+(macOS), `sudo apt install cloc` (Debian/Ubuntu), or use the official Windows
+executable as `cloc.exe` on `PATH`. No additional Python dependency is needed.
+If cloc is missing, fails, times out, or returns an incomplete/invalid report,
+yread falls back to its existing builtin line-counting heuristic for the whole
+report. `profile` shows the counter used in the `Counter` row. Both backends
+use yread's source-file selection, count duplicate files separately, and retain
+the same language labels and core/test split. Counts can differ between
+backends; neither is a full parser, and cloc defaults to treating Python
+triple-quoted strings as comments, including template strings used in assignments.
+
 When a repository contains Markdown, `DOCUMENTATION` separately reports its raw
 content size, a rough LLM input-token estimate, and the Chinese/English prose
 mix. It is a reader-friendly input-size signal, not a provider bill or an exact

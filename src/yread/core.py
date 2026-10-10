@@ -43,6 +43,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -834,64 +835,122 @@ def _line_stats(text: str, ext: str) -> tuple[int, int, int, int]:
     return total, blank, comment, code
 
 
-def language_stats(repo: Path) -> list[dict]:
-    """Per-language file counts and core code lines (test files excluded), sorted
-    by code lines descending then language. ``loc`` counts real code lines only —
-    blank and comment-only lines are excluded — so it reflects core code
-    substance rather than raw file length. The totals sum to ``code_stats``'
-    ``core_loc``."""
-    repo = repo.resolve()
-    stats: dict[str, dict[str, int]] = {}
-    for path in iter_source_files(repo):
-        ext = path.suffix.lower()
-        lang = SOURCE_EXTENSIONS.get(ext)
-        if not lang:
-            continue
-        rel = path.relative_to(repo).as_posix()
-        if _is_test_path(rel):
-            continue
-        try:
-            _total, _blank, _comment, code = _line_stats(path.read_text(encoding="utf-8", errors="replace"), ext)
-        except OSError:
-            continue
-        entry = stats.setdefault(lang, {"files": 0, "loc": 0})
-        entry["files"] += 1
-        entry["loc"] += code
-    return [
-        {"language": lang, "files": s["files"], "loc": s["loc"]}
-        for lang, s in sorted(stats.items(), key=lambda kv: (-kv[1]["loc"], kv[0]))
-    ]
+def _cloc_file_counts(repo: Path, files: list[Path]) -> dict[Path, int] | None:
+    """Count the selected files with cloc, or return None for whole-run fallback.
+
+    Keep yread's file selection and language labels. Disable cloc's default
+    duplicate removal and user config so installed settings cannot change our
+    scope. Incomplete reports fall back rather than silently losing files.
+    """
+    executable = shutil.which("cloc")
+    if executable is None:
+        return None
+    if not files:
+        return {}
+    # cloc's list format cannot represent filenames containing line breaks.
+    if any("\n" in str(path) or "\r" in str(path) for path in files):
+        return None
+    try:
+        result = subprocess.run(
+            [executable, f"--config={os.devnull}", "--json", "--by-file", "--quiet",
+             "--skip-uniqueness", "--list-file=-"],
+            input="".join(f"{path}\n" for path in files),
+            cwd=repo, capture_output=True, text=True, encoding="utf-8",
+            timeout=60, check=True,
+        )
+        report = json.loads(result.stdout)
+        if not isinstance(report, dict):
+            return None
+        allowed = set(files)
+        counts: dict[Path, int] = {}
+        for name, entry in report.items():
+            if name in {"header", "SUM"}:
+                continue
+            path = (repo / name).resolve()
+            if path not in allowed or path in counts or not isinstance(entry, dict):
+                return None
+            code = entry.get("code")
+            if type(code) is not int or code < 0:
+                return None
+            counts[path] = code
+        for path in files:
+            if path not in counts:
+                # cloc omits zero-byte files; the builtin backend counts them.
+                if path.stat().st_size != 0:
+                    return None
+                counts[path] = 0
+        return counts
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+        return None
 
 
-def code_stats(repo: Path) -> dict:
-    """Core-code metrics over source files from a single walk. Every count is
-    code lines — blank and comment-only lines excluded — split into non-test
-    ("core") code and test code, so the numbers reflect the logic a project
-    carries and how heavily it is tested."""
+def source_stats(repo: Path) -> dict:
+    """Shared language/core/test statistics from one file walk and counter run.
+
+    Prefer an installed cloc; use the existing line heuristic if unavailable,
+    failing, or unable to report every selected file. Never mix backends within
+    a report. ``backend`` identifies the counter actually used.
+    """
     repo = repo.resolve()
+    files = [path for path in iter_source_files(repo)
+             if path.suffix.lower() in SOURCE_EXTENSIONS]
+    counts = _cloc_file_counts(repo, files)
+    backend = "cloc" if counts is not None else "builtin"
+    if counts is None:
+        counts = {}
+        for path in files:
+            try:
+                counts[path] = _line_stats(
+                    path.read_text(encoding="utf-8", errors="replace"), path.suffix.lower(),
+                )[3]
+            except OSError:
+                continue
+    languages: dict[str, dict[str, int]] = {}
     core_files = core_loc = test_files = test_loc = 0
-    for path in iter_source_files(repo):
-        ext = path.suffix.lower()
-        if SOURCE_EXTENSIONS.get(ext) is None:
-            continue
-        try:
-            _total, _blank, _comment, code = _line_stats(path.read_text(encoding="utf-8", errors="replace"), ext)
-        except OSError:
-            continue
+    for path, code in counts.items():
         if _is_test_path(path.relative_to(repo).as_posix()):
             test_files += 1
             test_loc += code
         else:
             core_files += 1
             core_loc += code
+            lang = SOURCE_EXTENSIONS[path.suffix.lower()]
+            entry = languages.setdefault(lang, {"files": 0, "loc": 0})
+            entry["files"] += 1
+            entry["loc"] += code
     return {
-        "core_files": core_files,
-        "core_loc": core_loc,
-        "avg_file_loc": round(core_loc / core_files) if core_files else 0,
-        "test_files": test_files,
-        "test_loc": test_loc,
-        "test_ratio": round(test_loc / core_loc, 2) if core_loc else 0.0,
+        "backend": backend,
+        "languages": [
+            {"language": lang, "files": s["files"], "loc": s["loc"]}
+            for lang, s in sorted(languages.items(), key=lambda kv: (-kv[1]["loc"], kv[0]))
+        ],
+        "code": {
+            "core_files": core_files,
+            "core_loc": core_loc,
+            "avg_file_loc": round(core_loc / core_files) if core_files else 0,
+            "test_files": test_files,
+            "test_loc": test_loc,
+            "test_ratio": round(test_loc / core_loc, 2) if core_loc else 0.0,
+        },
     }
+
+
+def language_stats(repo: Path) -> list[dict]:
+    """Per-language core file/code counts, excluding tests, blanks and comments.
+
+    Sorted by code lines descending then language; totals sum to core_loc.
+    Prefer cloc, falling back to the builtin heuristic.
+    """
+    return source_stats(repo)["languages"]
+
+
+def code_stats(repo: Path) -> dict:
+    """Core/test code counts, excluding blanks and comments.
+
+    Prefer cloc, falling back to the builtin heuristic. Use source_stats when
+    language counts are also needed to share one counter run.
+    """
+    return source_stats(repo)["code"]
 
 
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
